@@ -104,7 +104,7 @@ def main():
                         help='Output file for processed query vectors (fvec file) if truncation or normalization is applied.')
     parser.add_argument('--k', type=int, required=True,
                         help='Number of nearest neighbors to compute ground truth indices for.')
-    parser.add_argument('--gpus', type=str, default="0",
+    parser.add_argument('--gpus', type=str, default="-1",
                         help='Comma-separated list of GPU ids to use. Use "-1" for CPU.')
     parser.add_argument('--metric', type=str, default='l2', choices=['l2', 'ip'],
                         help='Distance metric to use: "l2" or "ip".')
@@ -134,7 +134,7 @@ def main():
     print("Query vectors normalized:", "Yes" if query_normalized else "No")
 
     # Process datasets if truncation or normalization is requested.
-    if args.num_base > 0 or args.truncated_query > 0 or args.normalize:
+    if args.num_base > 0 or args.num_query > 0 or args.normalize:
         if args.num_base > 0:
             if args.num_base > base.shape[0]:
                 raise ValueError("Truncated base size exceeds full dataset size.")

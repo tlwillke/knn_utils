@@ -7,16 +7,44 @@ def read_fvecs(fname):
     """
     Reads an fvec file and returns a numpy array of shape (n, d).
     The file is assumed to be in the format where each vector is stored
-    as: [d, float, float, ..., float] with 1 integer dimension d and d floats.
+    as: [d, float, float, ..., float], with 1 integer dimension d and d floats.
     """
-    fname = os.path.expanduser(fname)  # Expand tilde to full home directory path
     with open(fname, "rb") as f:
-        data = np .fromfile(f, dtype=np.int32)  # Read as int32 to extract dimensions
-        dim = data[0].item()  # First value is the dimension
+        data = np .fromfile(f, dtype=np.int32)
+        dim = data[0].item()
         f.seek(0)  # Reset file pointer to re-read data correctly
         data = np.fromfile(f, dtype=np.float32)  # Read full data as float32
-        num_vectors = len(data) // (dim + 1)  # Compute number of vectors
+        num_vectors = len(data) // (dim + 1)
         return data.reshape(num_vectors, dim + 1)[:, 1:]  # Remove first column (dimension)
+
+def read_hdf5(fname, key="data"):
+    """
+    Reads an HDF5 file and returns a numpy array from the dataset with the given key.
+    """
+    import h5py
+    with h5py.File(fname, 'r') as hf:
+        if key not in hf:
+            raise ValueError(f"Key '{key}' not found in HDF5 file: {fname}")
+        dset = hf[key]
+        return np.array(dset)
+
+def read_vectors(fname):
+    """
+    Determines whether the file is HDF5 or fvec format.
+    For HDF5 files (extension .h5 or .hdf5), it checks for a colon.
+    If a colon is found, splits the string into filename and key.
+    Otherwise, uses the default key "data".
+    """
+    fname = os.path.expanduser(fname)
+    # If a colon is present, split into file_path and key.
+    if ':' in fname:
+        file_path, key = fname.split(':', 1)
+        if file_path.endswith('.h5') or file_path.endswith('.hdf5'):
+            return read_hdf5(file_path, key)
+        else:
+            raise ValueError("For HDF5, use the format 'file.h5:key'")
+    else:
+        return read_fvecs(fname)
 
 def write_fvecs(fname, arr):
     """
@@ -87,15 +115,17 @@ def main():
     parser = argparse.ArgumentParser(
         description='Compute ground truth for nearest neighbor search using a GPU.')
     parser.add_argument('--base', type=str, required=True,
-                        help='Path to the base vectors fvec file.')
+                        help='Path to the base vectors file (fvec or HDF5). For HDF5, use the format "file.h5:key".')
     parser.add_argument('--query', type=str, required=True,
-                        help='Path to the query vectors fvec file.')
+                        help='Path to the query vectors file (fvec or HDF5). For HDF5, use the format "file.h5:key".')
     parser.add_argument('--output', type=str, required=True,
                         help='Output ivec file to write ground truth indices.')
     parser.add_argument('--num_base', type=int, default=0,
                         help='Number of base vectors for truncated dataset (if 0, skip truncation).')
     parser.add_argument('--num_query', type=int, default=0,
                         help='Number of query vectors for truncated dataset (if 0, skip truncation).')
+    parser.add_argument('--shuffle', action='store_true', default=False,
+                        help='If set, shuffle both base and query vectors.')
     parser.add_argument('--normalize', action='store_true', default=False,
                         help='If set, normalize both base and query vectors.')
     parser.add_argument('--processed_base_out', type=str, default="",
@@ -112,13 +142,13 @@ def main():
 
     gpu_ids = [int(x) for x in args.gpus.split(',')]
 
-    # Load base and query vectors from fvec files
+    # Load base and query vectors from files
     print("Loading base vectors from:", args.base)
-    base = read_fvecs(args.base)
+    base = read_vectors(args.base)
     print(f"Loaded {base.shape[0]} base vectors of dimension {base.shape[1]}.")
 
     print("Loading query vectors from:", args.query)
-    query = read_fvecs(args.query)
+    query = read_vectors(args.query)
     print(f"Loaded {query.shape[0]} query vectors of dimension {query.shape[1]}.")
 
     # Ensure dimensions match
@@ -132,6 +162,14 @@ def main():
     query_normalized = check_normalization(query)
     print("Base vectors normalized:", "Yes" if base_normalized else "No")
     print("Query vectors normalized:", "Yes" if query_normalized else "No")
+
+    # Optionally shuffle both base and query vectors.
+    # Shuffle the full dataset before truncation.
+    if args.shuffle:
+        print("Shuffling both base and query vectors.")
+        np.random.seed(42)  # For reproducibility
+        np.random.shuffle(base)
+        np.random.shuffle(query)
 
     # Process datasets if truncation or normalization is requested.
     if args.num_base > 0 or args.num_query > 0 or args.normalize:
@@ -158,10 +196,10 @@ def main():
             print("Normalized both base and query vectors.")
 
         # Require processed output filenames when processing is applied.
-        if args.normalize or args.num_base > 0 and args.num_query > 0:
+        if args.normalize or args.shuffle or args.num_base > 0 and args.num_query > 0:
             if not args.processed_base_out or not args.processed_query_out:
                 raise ValueError(
-                    "When normalization or truncation is applied, processed_base_out and processed_query_out must be provided. ")
+                    "When normalization, shuffling, or truncation is applied, processed_base_out and processed_query_out must be provided. ")
             print("Writing processed base vectors to:", args.processed_base_out)
             write_fvecs(args.processed_base_out, base)
             print("Writing processed query vectors to:", args.processed_query_out)

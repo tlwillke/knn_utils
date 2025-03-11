@@ -13,6 +13,7 @@ knn_utils started as a KNN ground truth generator.  It is built around the [fais
 - Write ground truth to .ivec
 - Supports maximum inner product and L2 metrics
 - Vector normalization
+- Dataset shuffling
 
 ## Usage
 

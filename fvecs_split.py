@@ -45,10 +45,19 @@ def normalize_vectors(arr):
     norms[norms == 0] = 1
     return arr / norms
 
+def remove_zero_vectors(arr, tol=1e-6):
+    """
+    Removes vectors with an L2 norm below the tolerance.
+    Returns the filtered array and the number of zero vectors removed.
+    """
+    norms = np.linalg.norm(arr, axis=1)
+    non_zero_mask = norms >= tol
+    num_removed = np.sum(~non_zero_mask)
+    filtered = arr[non_zero_mask]
+    return filtered, num_removed
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Split an fvec file into query and base vectors."
-    )
+    parser = argparse.ArgumentParser(description="Split an fvec file into query and base vectors, removing zero vectors.")
     parser.add_argument("input", type=str, help="Input fvec file with vector embeddings")
     parser.add_argument("--num_query", type=int, default=10000,
                         help="Number of query vectors to select randomly (default: 10000)")
@@ -58,12 +67,19 @@ def main():
                         help="Normalize vectors to unit length")
     parser.add_argument("--shuffle", action="store_true",
                         help="Shuffle vectors before splitting")
+    parser.add_argument("--remove_zeros", action="store_true",
+                        help="Remove zero vectors from the embeddings")
     args = parser.parse_args()
 
     # Read the vectors.
     vectors = read_fvecs(args.input)
     total_vectors, dim = vectors.shape
     print(f"Loaded {total_vectors} vectors of dimension {dim}, data type: {vectors.dtype}")
+
+    # Optionally remove zero vectors.
+    if args.remove_zeros:
+        vectors, num_removed = remove_zero_vectors(vectors)
+        print(f"Removed {num_removed} zero vectors. {vectors.shape[0]} vectors remain.")
 
     # Optional normalization.
     if args.normalize:

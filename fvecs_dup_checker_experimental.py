@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-fvecs_dup_checker.py
+fvecs_dup_checker_experimental.py
 
 Verifies that a sorted .fvecs file is truly sorted, then deduplicates it and reports duplicates.
 
@@ -17,7 +17,7 @@ Then deduplicates it and reports duplicates.
 WARNING: Input file must be sorted. The script will abort at the first unsorted record.
 
 Usage:
-    ./fvecs_dup_checker.py /path/to/your/index_sorted.fvecs
+    ./fvecs_dup_checker_experimental.py /path/to/your/index_sorted.fvecs
 """
 
 import os

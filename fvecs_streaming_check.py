@@ -3,6 +3,7 @@ import numpy as np
 import argparse
 import struct
 
+PROGRESS_INTERVAL = 1_000_000
 
 def stream_check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'):
     """
@@ -87,6 +88,9 @@ def stream_check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='
             if total_vectors == 1:
                 first_embedding = vector.copy()  # Make a copy if you want to return it unmodified
 
+            if total_vectors % PROGRESS_INTERVAL == 0:
+                print(f"[Progress] processed {total_vectors} vectors…", flush=True)
+
             # --- Perform checks (norm, zero) ---
             norm_val = np.linalg.norm(vector)
             if plot:
@@ -141,6 +145,15 @@ def main():
             print(f"⚠️ Warning: Found {zero_count} ≈zero vectors in the embeddings.")
         else:
             print("✅ No zero vectors found in the embeddings.")
+
+        report_fname = f"{os.path.splitext(args.filename)[0]}_fvecs_check_report.txt"
+        with open(report_fname, "w") as report_file:
+            report_file.write(f"Input file: {args.filename}\n")
+            report_file.write(f"Total embeddings: {total_vectors}\n")
+            report_file.write(f"Dimension: {dim}\n")
+            report_file.write(f"Normalized: {normalized}\n")
+            report_file.write(f"Zero vectors: {zero_count}\n")
+        print(f"✅ Report saved to {report_fname}")
 
         if args.plot:
             try:

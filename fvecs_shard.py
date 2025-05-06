@@ -6,7 +6,7 @@ import argparse
 import sys
 
 # Usage:
-# ./shard_fvecs.py mydata.fvecs 1000000 --output-dir /shards
+# ./fvecs_shard.py mydata.fvecs 1000000 --output-dir /shards
 # Produces:
 # mydata_1000000_0.fvecs
 # mydata_1000000_1.fvecs
@@ -16,7 +16,7 @@ import sys
 #
 # Must specify absolute output path to write shards to (which will be created if it doesn't exist):
 
-def shard_fvecs(input_path: str, shard_size: int, output_dir: str):
+def fvecs_shard(input_path: str, shard_size: int, output_dir: str):
     # ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
@@ -109,7 +109,7 @@ def main():
         sys.exit(1)
 
     try:
-        shard_fvecs(args.input_file, args.shard_size, out_dir)
+        fvecs_shard(args.input_file, args.shard_size, out_dir)
     except Exception as e:
         print(f"ERROR: {e}", file=sys.stderr)
         sys.exit(1)

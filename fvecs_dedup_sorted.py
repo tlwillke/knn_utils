@@ -4,7 +4,7 @@ import struct
 import sys
 
 # Example usage:
-#   python dedup_sorted_fvecs.py \
+#   python fvecs_dedup_sorted.py \
 #     --input sorted_bigdata.fvecs \
 #     --output unique_bigdata.fvecs \
 #     --endian little

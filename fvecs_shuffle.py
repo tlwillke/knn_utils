@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-shuffle_fvecs.py
+fvecs_shuffle.py
 
 Shuffle all vectors in an .fvecs file in a memory-efficient way:
 – Reads the header to determine vector dimensionality.
@@ -11,7 +11,7 @@ Shuffle all vectors in an .fvecs file in a memory-efficient way:
 """
 
 # Usage:
-# ./shuffle_fvecs.py sorted_index.fvecs shuffled_index.fvecs
+# ./fvecs_shuffle.py sorted_index.fvecs shuffled_index.fvecs
 #!/usr/bin/env python3
 
 import os

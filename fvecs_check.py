@@ -5,7 +5,7 @@ import struct
 
 PROGRESS_INTERVAL = 1_000_000
 
-def stream_check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'):
+def check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'):
     """
     Stream process an .fvecs file to check for normalization and zero vectors.
     Allows specifying the endianness ('little' or 'big').
@@ -126,7 +126,7 @@ def main():
                         help="Plot a histogram of vector norms using Plotly")
     args = parser.parse_args()
     try:
-        total_vectors, dim, normalized, zero_count, first_embedding, norms_list = stream_check_fvecs(
+        total_vectors, dim, normalized, zero_count, first_embedding, norms_list = check_fvecs(
             args.filename,
             plot=args.plot,
             endian=args.endian  # Pass the selected endianness

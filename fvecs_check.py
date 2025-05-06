@@ -111,14 +111,14 @@ def check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'
     return total_vectors, d, normalized, zero_count, first_embedding, norms_list
 
 def main():
-    """Main function to check and validate an .fvecs file using streaming processing."""
+    """Main function to check and validate an .fvecs file using stream processing."""
     parser = argparse.ArgumentParser(
-        description="Check and validate an .fvecs file using streaming processing."
+        description="Check and validate an .fvecs file using stream processing."
     )
     parser.add_argument("filename", help="Path to the .fvecs file to check")
     parser.add_argument(
         "--endian",
-        choices=['little', 'big'], # Allow only these two choices
+        choices=['little', 'big'],
         default='little',         # Default to little-endian (fvec standard)
         help="Specify the byte order (endianness) of the file. Default: little"
     )

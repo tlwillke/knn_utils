@@ -1,134 +1,227 @@
+#!/usr/bin/env python3
+
+"""
+fvecs_split.py: Parallel, block-buffered splitter for .fvecs files.
+
+Reads a large .fvecs, samples query vectors, and splits into query/base files
+in parallel without reinterpreting float bytes.
+"""
 import os
-import numpy as np
 import argparse
+import random
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import glob
+import shutil
 
-"""
-This program splits an fvec file of vector embeddings into a base and query set
-of a specified size.  The two sets are mutually exclusive.  The queries are drawn at random.
+MIN_PARTITION_SIZE     = 1_000_000     # minimum vectors per partition
+IO_BUFFER_SIZE_BYTES   = 16 * 1024**2  # 16 MB per read/write block
 
-Example usage:
-python split_fvec.py vectors.fvec --normalize --shuffle --num_query 5000 --num_base 20000
-"""
+def read_dim_and_count(path):
+    """
+    Reads the vector dimension from the first 4 bytes of a .fvecs file
+    and computes the total number of records based on file size.
 
-def read_fvecs(fname):
+    @param path: filesystem path to the input .fvecs file
+    @return: tuple (dim, total_records)
+    @raises ValueError: if file is too short or its size is not a multiple of record size
     """
-    Reads an fvec file and returns a numpy array of shape (n, d).
-    Each vector is stored as: [d (int32), float, float, ..., float].
-    """
-    with open(fname, "rb") as f:
-        # Read the dimension (first int32) from the file.
-        header = np.fromfile(f, dtype=np.int32, count=1)
-        if header.size == 0:
-            raise ValueError("Empty file or invalid format.")
-        d = header[0].item()
-        # Go back to start and read all data as float32.
-        f.seek(0)
-        data = np.fromfile(f, dtype=np.float32)
-    num_vectors = len(data) // (d + 1)
-    # Reshape to (num_vectors, d+1) and drop the first column (the dimension).
-    return data.reshape(num_vectors, d + 1)[:, 1:]
+    with open(path, "rb") as f:
+        hdr = f.read(4)
+        if len(hdr) < 4:
+            raise ValueError("Empty or corrupt .fvecs file")
+        dim = int.from_bytes(hdr, byteorder="little", signed=True)
 
-def write_fvecs(fname, arr):
-    """
-    Writes a numpy array of shape (n, d) to an fvec file.
-    Each vector is written as: [d (int32), float, float, ..., float].
-    """
-    n, d = arr.shape
-    with open(fname, "wb") as f:
-        for vec in arr:
-            np.array([d], dtype=np.int32).tofile(f)
-            vec.astype(np.float32).tofile(f)
+    record_size = 4 + 4 * dim
+    total_bytes = os.path.getsize(path)
+    if total_bytes % record_size != 0:
+        raise ValueError("File size not a multiple of record size")
+    return dim, total_bytes // record_size
 
-def normalize_vectors(arr):
-    """Normalize each vector (L2 norm) and avoid division by zero."""
-    norms = np.linalg.norm(arr, axis=1, keepdims=True)
-    norms[norms == 0] = 1
-    return arr / norms
+def process_chunk(worker_id, start_idx, end_idx,
+                  query_idxs, input_path, record_size,
+                  q_part_dir, b_part_dir):
+    """
+    Reads a contiguous range of raw .fvecs records in large blocks,
+    splits each record into query or base output buffers based on the
+    sampled indices, and writes them out.
 
-def remove_zero_vectors(arr, tol=1e-6):
+    @param worker_id: integer ID of this worker (for logging)
+    @param start_idx: index of the first vector to process
+    @param end_idx:   index one past the last vector to process
+    @param query_idxs: set of integer indices chosen for the query file
+    @param input_path: path to the source .fvecs file
+    @param record_size: byte size of one record (4 + 4*dim)
+    @param q_part_dir: directory in which to write query_part{worker_id}.fvecs
+    @param b_part_dir: directory in which to write base_part{worker_id}.fvecs
+    @return: the worker_id on successful completion
     """
-    Removes vectors with an L2 norm below the tolerance.
-    Returns the filtered array and the number of zero vectors removed.
+    q_out = os.path.join(q_part_dir, f"query_part{worker_id}.fvecs")
+    b_out = os.path.join(b_part_dir, f"base_part{worker_id}.fvecs")
+
+    # how many records fit in one I/O block
+    recs_per_block = max(1, IO_BUFFER_SIZE_BYTES // record_size)
+
+    with open(input_path, "rb") as fin, \
+         open(q_out,     "wb") as fq, \
+         open(b_out,     "wb") as fb:
+
+        fin.seek(start_idx * record_size)
+        total_recs = end_idx - start_idx
+        remaining = total_recs
+        curr_idx = start_idx
+        processed = 0
+
+        while remaining > 0:
+            # read a block of raw bytes
+            this_block_recs = min(remaining, recs_per_block)
+            block_bytes = this_block_recs * record_size
+            data = fin.read(block_bytes)
+            if not data:
+                break
+
+            # split into two in-memory buffers
+            qbuf = bytearray()
+            bbuf = bytearray()
+            for j in range(this_block_recs):
+                offset = j * record_size
+                rec = data[offset : offset + record_size]
+                if curr_idx in query_idxs:
+                    qbuf.extend(rec)
+                else:
+                    bbuf.extend(rec)
+                curr_idx  += 1
+                processed += 1
+
+            # one big write per buffer
+            if qbuf:
+                fq.write(qbuf)
+            if bbuf:
+                fb.write(bbuf)
+
+            # progress every ~10% of this chunk
+            if processed % max(1, total_recs // 10) == 0:
+                pct = processed * 100 // total_recs
+                print(f"    [worker {worker_id}] {pct}% done")
+
+            remaining -= this_block_recs
+
+    return worker_id
+
+def concat_parts(parts, out_path, label):
     """
-    norms = np.linalg.norm(arr, axis=1)
-    non_zero_mask = norms >= tol
-    num_removed = np.sum(~non_zero_mask)
-    filtered = arr[non_zero_mask]
-    return filtered, num_removed
+    Concatenates a list of intermediate part-files into a single output file,
+    removing each part as it’s appended.
+
+    @param parts:   ordered list of filesystem paths to part .fvecs files
+    @param out_path: path for the merged output .fvecs
+    @param label:   descriptive label ('query' or 'base') for logging
+    """
+    print(f"→ Concatenating {len(parts)} {label} parts into {out_path}")
+    with open(out_path, "wb") as fout:
+        for i, part in enumerate(parts, 1):
+            with open(part, "rb") as fin:
+                shutil.copyfileobj(fin, fout)
+            os.remove(part)
+            print(f"    {label.capitalize()} concat: {i}/{len(parts)}")
+    print(f"✔ Finished {label} concatenation\n")
 
 def main():
-    parser = argparse.ArgumentParser(description="Split an fvec file into query and base vectors, removing zero vectors.")
-    parser.add_argument("input", type=str, help="Input fvec file with vector embeddings")
-    parser.add_argument("--num_query", type=int, default=10000,
-                        help="Number of query vectors to select randomly (default: 10000)")
-    parser.add_argument("--num_base", type=int, default=None,
-                        help="Number of base vectors to store from the remaining vectors (default: all remaining)")
-    parser.add_argument("--normalize", action="store_true",
-                        help="Normalize vectors to unit length")
-    parser.add_argument("--shuffle", action="store_true",
-                        help="Shuffle vectors before splitting")
-    parser.add_argument("--remove_zeros", action="store_true",
-                        help="Remove zero vectors from the embeddings")
-    args = parser.parse_args()
+    """
+    Orchestrates the parallel split of a single .fvecs file into
+    query and base outputs:
 
-    # Read the vectors.
-    vectors = read_fvecs(args.input)
-    total_vectors, dim = vectors.shape
-    print(f"Loaded {total_vectors} vectors of dimension {dim}, data type: {vectors.dtype}")
+      1. Parses command-line arguments.
+      2. Reads the dimension header and total record count.
+      3. Reservoir-samples k query indices at random.
+      4. Partitions the full record range into P worker chunks
+         (respecting MIN_PARTITION_SIZE and CPU count).
+      5. Uses a ThreadPoolExecutor to process each chunk in parallel
+         with block-buffered raw-byte I/O.
+      6. Concatenates the per-worker query and base parts.
+      7. Optionally truncates the base output if --num_base was set.
 
-    # Optionally remove zero vectors.
-    if args.remove_zeros:
-        vectors, num_removed = remove_zero_vectors(vectors)
-        print(f"Removed {num_removed} zero vectors. {vectors.shape[0]} vectors remain.")
+    Usage: splitter.py <input.fvecs> [--num_query N] [--num_base M]
+    """
+    p = argparse.ArgumentParser(
+        description=(
+            "Parallel, block-buffered raw-byte split of an .fvecs file\n"
+            f"(min partition size={MIN_PARTITION_SIZE}, I/O buffer={IO_BUFFER_SIZE_BYTES//(1024**2)} MB)"
+        )
+    )
+    p.add_argument("input", help="Input .fvecs file")
+    p.add_argument("--num_query", type=int, default=10_000,
+                   help="How many query vectors to sample")
+    p.add_argument("--num_base", type=int, default=None,
+                   help="Max number of base vectors (default: all remaining)")
+    args = p.parse_args()
 
-    # Optional normalization.
-    if args.normalize:
-        vectors = normalize_vectors(vectors)
-        print("Vectors normalized.")
+    # Phase 1: header + count
+    dim, total_records = read_dim_and_count(args.input)
+    record_size = 4 + 4 * dim
 
-    # Optional shuffle.
-    if args.shuffle:
-        np.random.shuffle(vectors)
-        print("Vectors shuffled.")
+    if args.num_query > total_records:
+        raise ValueError(f"num_query={args.num_query} > {total_records} available")
 
-    # Ensure we don't request more query vectors than available.
-    if args.num_query > total_vectors:
-        raise ValueError(f"Requested num_query {args.num_query} exceeds available vectors {total_vectors}.")
+    # Phase 2: sampling
+    print(f"→ Sampling {args.num_query} queries out of {total_records} vectors...")
+    query_idxs = set(random.sample(range(total_records), args.num_query))
+    print(f"✔ Sampled {len(query_idxs)} unique query indices\n")
 
-    # Select query vectors.
-    # If vectors were not shuffled already, randomly sample indices.
-    if not args.shuffle:
-        indices = np.random.choice(total_vectors, args.num_query, replace=False)
-        query_vectors = vectors[indices]
-        # Create the remaining base set.
-        mask = np.ones(total_vectors, dtype=bool)
-        mask[indices] = False
-        base_vectors = vectors[mask]
-    else:
-        # If already shuffled, simply split the array.
-        query_vectors = vectors[:args.num_query]
-        base_vectors = vectors[args.num_query:]
+    remaining = total_records - args.num_query
+    base_limit = remaining if args.num_base is None else min(remaining, args.num_base)
 
-    # Optionally truncate the base vectors if a limit is provided.
-    if args.num_base is not None:
-        if args.num_base > base_vectors.shape[0]:
-            print(f"Warning: Requested num_base {args.num_base} exceeds available base vectors "
-                  f"({base_vectors.shape[0]}); using all available.")
-        else:
-            base_vectors = base_vectors[:args.num_base]
-
-    # Generate output filenames.
     base_name, ext = os.path.splitext(args.input)
-    query_file = base_name + "_query" + ext
-    base_file = base_name + "_base" + ext
+    q_final = f"{base_name}_query{ext}"
+    b_final = f"{base_name}_base{ext}"
+    q_part_dir = f"{base_name}_qparts"
+    b_part_dir = f"{base_name}_bparts"
+    os.makedirs(q_part_dir, exist_ok=True)
+    os.makedirs(b_part_dir, exist_ok=True)
 
-    # Write the query and base vectors.
-    write_fvecs(query_file, query_vectors)
-    write_fvecs(base_file, base_vectors)
+    # Phase 3: partition decision
+    min_chunk = MIN_PARTITION_SIZE
+    max_parts = total_records // min_chunk or 1
+    cpu_cores = os.cpu_count() or 1
+    P = min(cpu_cores, max_parts)
+    print(f"→ Splitting into {P} partition(s) (min chunk = {min_chunk} vectors)...")
+    chunk = math.ceil(total_records / P)
+    work = [(wid, wid*chunk, min((wid+1)*chunk, total_records))
+            for wid in range(P) if wid*chunk < total_records]
 
-    # Report numbers.
-    print(f"Stored {query_vectors.shape[0]} query vectors in '{query_file}'.")
-    print(f"Stored {base_vectors.shape[0]} base vectors in '{base_file}'.")
+    # Phase 4: parallel block‐buffered split
+    print(f"→ Launching {len(work)} worker threads with {IO_BUFFER_SIZE_BYTES//(1024**2)} MB buffers...")
+    with ThreadPoolExecutor(max_workers=len(work)) as exe:
+        futures = {
+            exe.submit(process_chunk, wid, start, end,
+                       query_idxs, args.input, record_size,
+                       q_part_dir, b_part_dir): wid
+            for wid, start, end in work
+        }
+        for completed, fut in enumerate(as_completed(futures), 1):
+            wid = futures[fut]
+            fut.result()  # raise if error
+            print(f"  ✔ Worker {wid} finished ({completed}/{len(work)})")
+    print("✔ All workers done\n")
 
-if __name__ == '__main__':
+    # Phase 5: concat query parts
+    q_parts = sorted(glob.glob(f"{q_part_dir}/query_part*.fvecs"),
+                     key=lambda fn: int(fn.split("query_part")[1].split(".")[0]))
+    concat_parts(q_parts, q_final, "query")
+
+    # Phase 6: concat base parts
+    b_parts = sorted(glob.glob(f"{b_part_dir}/base_part*.fvecs"),
+                     key=lambda fn: int(fn.split("base_part")[1].split(".")[0]))
+    concat_parts(b_parts, b_final, "base")
+
+    # Phase 7: optional truncation of base
+    if args.num_base is not None:
+        keep = min(remaining, args.num_base)
+        with open(b_final, "r+b") as fb:
+            fb.truncate(keep * record_size)
+        print(f"✔ Truncated base to {keep}/{remaining} vectors\n")
+
+    print(f"All done!\n • Queries → {q_final}\n • Base    → {b_final}")
+
+if __name__ == "__main__":
     main()

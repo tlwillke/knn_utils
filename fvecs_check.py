@@ -97,7 +97,8 @@ def check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'
                 norms_list.append(norm_val)
 
             # Update overall normalized status
-            if normalized and not (abs(norm_val - 1) < tol_norm):
+            if (abs(norm_val - 1) > tol_norm):
+                print(f"Vector # {total_vectors} norm value is {norm_val}")
                 normalized = False  # Once false, stays false
 
             # Count zero vectors

@@ -2,6 +2,7 @@ import os
 import numpy as np
 import faiss
 import argparse
+import struct
 
 def read_fvecs(fname):
     """
@@ -54,11 +55,11 @@ def write_fvecs(fname, arr):
     n, d = arr.shape
     fname = os.path.expanduser(fname)  # Expand tilde to full home directory path
     with open(fname, "wb") as f:
-        for i in range(n):
-            # Write the dimension as int32
-            np.array([d], dtype=np.int32).tofile(f)
-            # Write the vector data as float32
-            arr[i].astype(np.float32).tofile(f)
+        d_repr = struct.unpack("<f", np.uint32(d))[0]
+        # fvecs format: [[dim, vec1...], [dim, vec2...]]
+        formatted = np.concatenate((np.full((n, 1), d_repr, dtype=np.float32), arr.astype(np.float32)), axis=1)
+        assert(struct.unpack("<I", formatted[0][0]) == (d,))
+        formatted.tofile(f)
 
 def write_ivecs(fname, ivecs):
     """
@@ -69,11 +70,9 @@ def write_ivecs(fname, ivecs):
     n, k = ivecs.shape
     fname = os.path.expanduser(fname)  # Expand tilde to full home directory path
     with open(fname, 'wb') as f:
-        for i in range(n):
-            # Write the count (k) as an int32
-            np.array([k], dtype=np.int32).tofile(f)
-            # Write the vector of indices
-            ivecs[i].astype(np.int32).tofile(f)
+        # ivecs format: [[k, int...(k times)], [k, int...(k times)]]
+        formatted = np.concatenate((np.full((n, 1), k, dtype=np.int32), ivecs.astype(np.int32)), axis=1)
+        formatted.tofile(f)
 
 def check_normalization(vecs, tol=1e-3):
     """

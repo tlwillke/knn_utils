@@ -172,7 +172,7 @@ def main():
         np.random.shuffle(query)
 
     # Process datasets if truncation or normalization is requested.
-    if args.num_base > 0 or args.num_query > 0 or args.normalize:
+    if args.num_base > 0 or args.num_query > 0 or args.normalize or args.shuffle:
         if args.num_base > 0:
             if args.num_base > base.shape[0]:
                 raise ValueError("Truncated base size exceeds full dataset size.")

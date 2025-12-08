@@ -170,51 +170,50 @@ def main():
         np.random.shuffle(base)
         np.random.shuffle(query)
 
-    # Process datasets if truncation or normalization is requested.
-    if args.num_base > 0 or args.num_query > 0 or args.normalize or args.shuffle:
-        if args.num_base > 0:
-            if args.num_base > base.shape[0]:
-                raise ValueError("Truncated base size exceeds full dataset size.")
-            base = base[:args.num_base]
-            print(f"Using truncated base: {args.num_base} vectors.")
-        if args.num_query > 0:
-            if args.num_query > query.shape[0]:
-                raise ValueError("Truncated query size exceeds full dataset size.")
-            query = query[:args.num_query]
-            print(f"Using truncated query: {args.num_query} vectors.")
+    # Process any truncations.
+    if args.num_base > 0:
+        if args.num_base > base.shape[0]:
+            raise ValueError("Truncated base size exceeds full dataset size.")
+        base = base[:args.num_base]
+        print(f"Using truncated base: {args.num_base} vectors.")
+    if args.num_query > 0:
+        if args.num_query > query.shape[0]:
+            raise ValueError("Truncated query size exceeds full dataset size.")
+        query = query[:args.num_query]
+        print(f"Using truncated query: {args.num_query} vectors.")
 
-        # Apply normalization if requested (to both base and query).
-        if args.normalize:
-            def normalize_vectors(arr):
-                norms = np.linalg.norm(arr, axis=1, keepdims=True)
-                norms[norms == 0] = 1  # Prevent division by zero.
-                return arr / norms
+    # Apply normalization if requested (to both base and query).
+    if args.normalize:
+        def normalize_vectors(arr):
+            norms = np.linalg.norm(arr, axis=1, keepdims=True)
+            norms[norms == 0] = 1  # Prevent division by zero.
+            return arr / norms
 
-            base = normalize_vectors(base)
-            query = normalize_vectors(query)
-            print("Normalized both base and query vectors.")
+        base = normalize_vectors(base)
+        query = normalize_vectors(query)
+        print("Normalized both base and query vectors.")
 
-        # Require processed output filenames when processing is applied.
-        if args.normalize or args.shuffle or args.num_base > 0 and args.num_query > 0:
-            if not args.processed_base_out or not args.processed_query_out:
-                raise ValueError(
-                    "When normalization, shuffling, or truncation is applied, processed_base_out and processed_query_out must be provided. ")
-            print("Writing processed base vectors to:", args.processed_base_out)
-            write_fvecs(args.processed_base_out, base)
-            print("Writing processed query vectors to:", args.processed_query_out)
-            write_fvecs(args.processed_query_out, query)
-        elif args.num_base > 0:
-            if not args.processed_base_out:
-                raise ValueError(
-                    "When truncation is applied, processed_base_out must be provided.")
-            print("Writing processed base vectors to:", args.processed_base_out)
-            write_fvecs(args.processed_base_out, base)
-        elif args.num_query > 0:
-            if not args.processed_query_out:
-                raise ValueError(
-                    "When truncation is applied, processed_query_out must be provided.")
-            print("Writing processed query vectors to:", args.processed_query_out)
-            write_fvecs(args.processed_query_out, query)
+    # Require processed output filenames when processing is applied.
+    if args.normalize or args.shuffle or args.num_base > 0 and args.num_query > 0:
+        if not args.processed_base_out or not args.processed_query_out:
+            raise ValueError(
+                "When normalization, shuffling, or truncation is applied, processed_base_out and processed_query_out must be provided. ")
+        print("Writing processed base vectors to:", args.processed_base_out)
+        write_fvecs(args.processed_base_out, base)
+        print("Writing processed query vectors to:", args.processed_query_out)
+        write_fvecs(args.processed_query_out, query)
+    elif args.num_base > 0:
+        if not args.processed_base_out:
+            raise ValueError(
+                "When truncation is applied, processed_base_out must be provided.")
+        print("Writing processed base vectors to:", args.processed_base_out)
+        write_fvecs(args.processed_base_out, base)
+    elif args.num_query > 0:
+        if not args.processed_query_out:
+            raise ValueError(
+                "When truncation is applied, processed_query_out must be provided.")
+        print("Writing processed query vectors to:", args.processed_query_out)
+        write_fvecs(args.processed_query_out, query)
 
     # Creating index and adding base vectors.
     print("Adding base vectors to the index...")

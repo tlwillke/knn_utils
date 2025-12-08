@@ -1,50 +1,88 @@
 import os
 import numpy as np
 import argparse
+import random
 import struct
 
-def get_fvec_at_line(fname, target_index, endian='little'):
+def check_dim(filename, struct_fmt_int="<i", numpy_fmt_float=np.float32, max_samples=100):
     """
-    Returns the vector at the given zero-based index from a .fvecs file using streaming.
+    Opens an fvecs file and validates that all sampled records have the same
+    dimensionality. Uses a random sample of up to `max_samples` records.
+
+    Returns:
+        first_d      : vector dimensionality
+        record_size  : bytes per record
+        num_records  : total number of vectors
+
+    Raises:
+        ValueError if any sampled record has mismatched dimensionality or if the
+        file size is not a proper multiple of the record size.
     """
-    fname = os.path.expanduser(fname)
 
-    if endian == 'little':
-        struct_prefix = '<'
-        numpy_fmt_float = '<f4'
-    elif endian == 'big':
-        struct_prefix = '>'
-        numpy_fmt_float = '>f4'
-    else:
-        raise ValueError(f"Invalid endianness specified: {endian}")
+    with open(filename, "rb") as f:
+        # --- Read first dimension ---
+        first_d = struct.unpack(struct_fmt_int, f.read(4))[0]
+        record_size = 4 + 4 * first_d
 
-    struct_fmt_int = struct_prefix + 'i'
+        # --- Compute number of records from file size ---
+        f.seek(0, 2)
+        file_size = f.tell()
 
-    with open(fname, 'rb') as f:
-        line_num = 0
-        while True:
-            d_bytes = f.read(4)
-            if not d_bytes:
-                raise IndexError(f"Reached EOF before index {target_index}.")
+        if file_size % record_size != 0:
+            raise ValueError(
+                f"Invalid fvecs file: size {file_size} is not a multiple of "
+                f"record size {record_size}."
+            )
 
-            if len(d_bytes) < 4:
-                raise ValueError(f"Incomplete dimension header at line {line_num}.")
+        num_records = file_size // record_size
 
-            d = struct.unpack(struct_fmt_int, d_bytes)[0]
-            vec_bytes = f.read(4 * d)
-            if len(vec_bytes) < 4 * d:
-                raise ValueError(f"Incomplete vector data at line {line_num}.")
+        # --- Choose random sample positions ---
+        sample_count = min(num_records, max_samples)
 
-            if line_num == target_index:
-                vector = np.frombuffer(vec_bytes, dtype=numpy_fmt_float)
-                return vector
+        # Always include record 0 (already checked), so sample from 1..num_records-1
+        if num_records > 1:
+            sample_indices = random.sample(range(1, num_records), sample_count - 1)
+            sample_indices.insert(0, 0)  # Ensure index 0 always included
+        else:
+            sample_indices = [0]
 
-            # Skip to next line
-            line_num += 1
+        # --- Mandatory dimensionality check using random sample ---
+        for idx in sample_indices:
+            offset = idx * record_size
+            f.seek(offset)
+            d = struct.unpack(struct_fmt_int, f.read(4))[0]
+            if d != first_d:
+                raise ValueError(
+                    f"Dimension mismatch at record {idx}: expected {first_d}, found {d}. "
+                    "This file does not conform to fixed-d fvecs format."
+                )
+
+        return first_d, record_size, num_records
+
+def read_vector_at(filename, index, first_d, record_size, num_records, numpy_fmt_float=np.float32):
+    """O(1) random-access read of the vector at record index."""
+
+    if index < 0 or index >= num_records:
+        raise IndexError(
+            f"Requested index {index}, but file contains {num_records} records "
+            f"(valid range: 0 .. {num_records-1})."
+        )
+
+    with open(filename, "rb") as f:
+        offset = index * record_size
+        f.seek(offset + 4)  # skip the dimension int
+        data = f.read(4 * first_d)
+        if len(data) != 4 * first_d:
+            raise ValueError(
+                f"File ended unexpectedly when reading vector {index}. "
+                "File may be corrupted or truncated."
+            )
+        vec = np.frombuffer(data, dtype=numpy_fmt_float).copy()
+        return vec
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Print the vector at a given line number from an .fvecs file (streamed)."
+        description="Print the vector at a given line number from an .fvecs file."
     )
     parser.add_argument("filename", help="Path to the .fvecs file.")
     parser.add_argument("line_number", type=int, help="0-based index of the line/vector to read.")
@@ -56,12 +94,22 @@ def main():
     )
     args = parser.parse_args()
 
+    fname = os.path.expanduser(args.filename)
+
+    endian_map = {
+        "little": ("<i", "<f4"),
+        "big":    (">i", ">f4"),
+    }
+    struct_fmt_int, numpy_fmt_float = endian_map[args.endian]
+
     try:
-        vec = get_fvec_at_line(args.filename, args.line_number, endian=args.endian)
-        print(f"Vector at line {args.line_number}:")
-        print(vec)
+        dim, record_size, num_records = check_dim(fname, struct_fmt_int, numpy_fmt_float, max_samples=100)
+        vec = read_vector_at(fname, args.line_number, dim, record_size, num_records, numpy_fmt_float)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        parser.error(str(e))
+
+    print(f"{dim}-dim vector at line {args.line_number} of {num_records} lines:")
+    print(vec)
 
 if __name__ == "__main__":
     main()

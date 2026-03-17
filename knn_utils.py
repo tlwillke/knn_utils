@@ -1,4 +1,5 @@
 import os
+import sys
 import numpy as np
 import faiss
 import argparse
@@ -28,6 +29,17 @@ def read_hdf5(fname, key="data"):
             raise ValueError(f"Key '{key}' not found in HDF5 file: {fname}")
         dset = hf[key]
         return np.array(dset)
+
+def read_hdf5_tensor(fname, key="data"):
+    """
+    Reads an HDF5 file and returns a numpy array from the dataset with the given key.
+    """
+    import h5py
+    with h5py.File(fname, 'r') as hf:
+        if key not in hf:
+            raise ValueError(f"Key '{key}' not found in HDF5 file: {fname}")
+        tensor_arr = np.array(hf[key])
+        return tensor_arr.reshape(-1, tensor_arr.shape[-1])
 
 def read_vectors(fname):
     """
@@ -73,6 +85,24 @@ def write_ivecs(fname, ivecs):
         # ivecs format: [[k, int...(k times)], [k, int...(k times)]]
         formatted = np.concatenate((np.full((n, 1), k, dtype=np.int32), ivecs.astype(np.int32)), axis=1)
         formatted.tofile(f)
+
+def count_zero_vectors(vecs, eps=0.0):
+    """
+    Count vectors with L2 norm <= eps. Use eps=0.0 for exact zeros.
+    """
+    norms = np.linalg.norm(vecs, axis=1)
+    return int(np.sum(norms <= eps))
+
+def remove_zero_vectors(arr, name, eps=0.0):
+    # eps lets you treat "near-zero" as zero if desired; keep eps=0.0 for exact zeros
+    norms = np.linalg.norm(arr, axis=1)
+    keep = norms > eps
+    removed = int((~keep).sum())
+    if removed:
+        print(f"Removed {removed} zero vectors from {name} (kept {keep.sum()} / {arr.shape[0]}).")
+    else:
+        print(f"Removed 0 zero vectors from {name}.")
+    return arr[keep]
 
 def check_normalization(vecs, tol=1e-3):
     """
@@ -123,6 +153,8 @@ def main():
                         help='Number of base vectors for truncated dataset (if 0, skip truncation).')
     parser.add_argument('--num_query', type=int, default=0,
                         help='Number of query vectors for truncated dataset (if 0, skip truncation).')
+    parser.add_argument('--remove_zeros', action='store_true', default=False,
+                        help='If set, remove zero-norm vectors from both base and query.')
     parser.add_argument('--shuffle', action='store_true', default=False,
                         help='If set, shuffle both base and query vectors.')
     parser.add_argument('--normalize', action='store_true', default=False,
@@ -137,6 +169,9 @@ def main():
                         help='Comma-separated list of GPU ids to use. Use "-1" for CPU.')
     parser.add_argument('--metric', type=str, default='l2', choices=['l2', 'ip'],
                         help='Distance metric to use: "l2" or "ip".')
+    if len(sys.argv) == 1:
+        parser.print_help(sys.stderr)   # prints "usage:" line + options
+        sys.exit(2)
     args = parser.parse_args()
 
     gpu_ids = [int(x) for x in args.gpus.split(',')]
@@ -155,6 +190,21 @@ def main():
     if query.shape[1] != d:
         raise ValueError("Dimension mismatch: base vectors have dimension {} but query vectors have dimension {}."
                          .format(d, query.shape[1]))
+
+    # Check for zero vectors (before any shuffling/truncation/normalization)
+    base_zero = count_zero_vectors(base)  # exact zeros
+    query_zero = count_zero_vectors(query)  # exact zeros
+    print(f"Base zero vectors: {base_zero} / {base.shape[0]}")
+    print(f"Query zero vectors: {query_zero} / {query.shape[0]}")
+
+    if args.remove_zeros:
+        print("Removing zero vectors from both base and query.")
+        base = remove_zero_vectors(base, "base")
+        query = remove_zero_vectors(query, "query")
+        if base.shape[0] == 0:
+            raise ValueError("All base vectors were zero after removal.")
+        if query.shape[0] == 0:
+            raise ValueError("All query vectors were zero after removal.")
 
     # Check normalization of base and query vectors.
     base_normalized = check_normalization(base)
@@ -194,10 +244,10 @@ def main():
         print("Normalized both base and query vectors.")
 
     # Require processed output filenames when processing is applied.
-    if args.normalize or args.shuffle or args.num_base > 0 and args.num_query > 0:
+    if args.remove_zeros or args.normalize or args.shuffle or args.num_base > 0 and args.num_query > 0:
         if not args.processed_base_out or not args.processed_query_out:
             raise ValueError(
-                "When normalization, shuffling, or truncation is applied, processed_base_out and processed_query_out must be provided. ")
+                "When removing zeros, normalization, shuffling, or truncation is applied, processed_base_out and processed_query_out must be provided. ")
         print("Writing processed base vectors to:", args.processed_base_out)
         write_fvecs(args.processed_base_out, base)
         print("Writing processed query vectors to:", args.processed_query_out)

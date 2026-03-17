@@ -341,6 +341,9 @@ def main():
     if first_chunk is None:
         print("⚠️  Input file empty. Exiting.")
         sys.exit(1)
+    if len(first_chunk) < args.chunk_size:
+        print(
+            f"⚠️  Warning: file may contain fewer than --chunk_size={args.chunk_size} vectors; reduce --chunk_size.")
     dim = len(first_chunk[0][0])
     raw_q.put(first_chunk)
 

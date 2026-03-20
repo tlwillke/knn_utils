@@ -70,7 +70,7 @@ def writer_thread(temp_dir, sorted_q, endian_prefix, dim):
     sorted_q.task_done()
     print("[Writer] Done")
 
-def merge_runs(temp_dir, run_count, reporting_threshold, output_path, endian_prefix, report_path=None):
+def merge_runs(temp_dir, run_count, reporting_threshold, output_path, endian_prefix, report_path=None, verbose_dups=False):
     report_f = open(report_path, 'w') if report_path else None
     fmt_int  = endian_prefix + 'i'
     line_fmt = endian_prefix + 'q'
@@ -115,7 +115,8 @@ def merge_runs(temp_dir, run_count, reporting_threshold, output_path, endian_pre
             else:
                 if last_vec is not None and dup_count > reporting_threshold:
                     msg = f"Line {last_line}: {last_vec[:4]} appears {dup_count} times"
-                    print(f"[Dup] {msg}")
+                    if verbose_dups:
+                        print(f"[Dup] {msg}")
                     if report_f:
                         report_f.write(msg + "\n")
                     dup_hist[dup_count] += 1
@@ -142,7 +143,8 @@ def merge_runs(temp_dir, run_count, reporting_threshold, output_path, endian_pre
 
         if last_vec is not None and dup_count > reporting_threshold:
             msg = f"Line {last_line}: {last_vec[:4]} appears {dup_count} times"
-            print(f"[Dup] {msg}")
+            if verbose_dups:
+                print(f"[Dup] {msg}")
             if report_f:
                 report_f.write(msg + "\n")
             dup_hist[dup_count] += 1
@@ -191,7 +193,7 @@ def merge_runs(temp_dir, run_count, reporting_threshold, output_path, endian_pre
                 f"{str(others):<{w3}}"
             )
 
-def dedup_presorted(input_path, reporting_threshold, output_path, endian_prefix, report_path=None):
+def dedup_presorted(input_path, reporting_threshold, output_path, endian_prefix, report_path=None, verbose_dups=False):
     report_f = open(report_path, 'w') if report_path else None
     fmt_int = endian_prefix + 'i'
     dup_hist = Counter()
@@ -228,7 +230,8 @@ def dedup_presorted(input_path, reporting_threshold, output_path, endian_prefix,
                 total_written += 1
                 if last_vec is not None and dup_count > reporting_threshold:
                     msg = f"Line {last_line}: {last_vec[:4]} appears {dup_count} times"
-                    print(f"[Dup] {msg}")
+                    if verbose_dups:
+                        print(f"[Dup] {msg}")
                     if report_f:
                         report_f.write(msg + "\n")
                     dup_hist[dup_count] += 1
@@ -246,12 +249,14 @@ def dedup_presorted(input_path, reporting_threshold, output_path, endian_prefix,
                 print(f"[Dedup] Processed {total:,} vectors")
 
         if last_vec is not None and dup_count > reporting_threshold:
-            msg = f"Line {last_line}: {last_vec[:4]} appears {dup_count} times"
-            print(f"[Dup] {msg}")
-            if report_f:
-                report_f.write(msg + "\n")
-            dup_hist[dup_count] += 1
-            dup_recs.append((dup_count, last_line, last_vec[:4], other_lines[:]))
+            if last_vec is not None and dup_count > reporting_threshold:
+                msg = f"Line {last_line}: {last_vec[:4]} appears {dup_count} times"
+                if verbose_dups:
+                    print(f"[Dup] {msg}")
+                if report_f:
+                    report_f.write(msg + "\n")
+                dup_hist[dup_count] += 1
+                dup_recs.append((dup_count, last_line, last_vec[:4], other_lines[:]))
 
     removed = total_processed - total_written
     print(f"[Dedup] Total unique written: {total_written}, removed: {removed}")
@@ -302,6 +307,8 @@ def main():
                    help="Final merged output filename (default sorted_<input>)")
     p.add_argument("-r", "--report_file", default=None,
                    help="Path to write duplicate report (one line per vector)")
+    p.add_argument("--verbose_dups", action='store_true',
+                   help="Print each qualifying duplicate group to stdout")
     p.add_argument("--presorted", action='store_true',
                    help="Skip chunking/sorting and dedupe presorted input file")
     args = p.parse_args()
@@ -315,7 +322,8 @@ def main():
             args.reporting_threshold,
             output,
             endian_prefix,
-            args.report_file
+            args.report_file,
+            args.verbose_dups
         )
         sys.exit(0)
 
@@ -341,11 +349,16 @@ def main():
     if first_chunk is None:
         print("⚠️  Input file empty. Exiting.")
         sys.exit(1)
+
+    effective_chunk_size = args.chunk_size
     if len(first_chunk) < args.chunk_size:
+        effective_chunk_size = len(first_chunk)
         print(
-            f"⚠️  Warning: file may contain fewer than --chunk_size={args.chunk_size} vectors; reduce --chunk_size.")
+            f"⚠️  Warning: input contains fewer vectors than --chunk_size={args.chunk_size}; "
+            f"using a chunk size of {effective_chunk_size} for this run."
+        )
+
     dim = len(first_chunk[0][0])
-    raw_q.put(first_chunk)
 
     wt = threading.Thread(
         target=writer_thread,
@@ -354,6 +367,12 @@ def main():
     wt.start()
 
     run_id = 0
+
+    print(f"[Main] Sorting chunk {run_id:04d} ({len(first_chunk)} vectors)…")
+    first_chunk.sort(key=lambda x: x[0])
+    sorted_q.put((run_id, first_chunk))
+    run_id += 1
+
     while True:
         chunk = raw_q.get()
         if chunk is None:
@@ -373,12 +392,11 @@ def main():
         args.reporting_threshold,
         output,
         endian_prefix,
-        args.report_file
+        args.report_file,
+        args.verbose_dups
     )
 
     # shutil.rmtree(temp_dir)
 
 if __name__ == "__main__":
     main()
-
-

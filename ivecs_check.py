@@ -1,125 +1,250 @@
 #!/usr/bin/env python3
 
+import os
 import struct
 import sys
-import os
+from collections import Counter
 
-def read_ivecs_info(filepath):
+
+def write_report(report_path, report_lines):
+    """Write the validation report to a text file in the current working directory."""
+    with open(report_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(report_lines) + "\n")
+
+
+def validate_ivecs_file(filepath, required_k):
     """
-    Reads an .ivecs file to get the first row, number of rows, and vector length.
+    Validate an .ivecs ground-truth file.
 
-    Args:
-        filepath (str): The path to the .ivecs file.
+    Checks performed:
+      - duplicate ordinals within each row (error)
+      - negative entries within each row (error; valid values are >= 0)
+      - row length differs from required_k (error)
+      - malformed / truncated file while parsing (error)
 
-    Returns:
-        tuple: A tuple containing:
-            - list: The first vector (row) as a list of integers, or None if empty.
-            - int: The total number of vectors (rows) in the file.
-            - int: The dimensionality (length) of the vectors, or None if empty.
-    Raises:
-        FileNotFoundError: If the file does not exist.
-        IOError: If there's an error reading the file (e.g., malformed).
-        ValueError: If dimensions are inconsistent or non-positive.
+    Returns a dict containing both parsed info and validation findings.
+    Rows are reported with 0-based row numbers.
     """
+    result = {
+        "first_row": None,
+        "num_rows": 0,                 # fully read rows
+        "first_row_length": None,      # first fully read row length
+        "max_row_length": 0,           # max declared row length seen
+        "max_ordinal": None,           # largest integer found in fully read rows
+        "duplicate_rows": [],          # [(row_num, {ordinal: count, ...}), ...]
+        "negative_rows": [],           # [(row_num, negative_count), ...]
+        "truncation_rows": [],         # [(row_num, row_len), ...] where row_len < required_k
+        "overlong_rows": [],           # [(row_num, row_len), ...] where row_len > required_k
+        "fatal_error": None,           # parse error string, if any
+    }
+
     if not os.path.exists(filepath):
-        raise FileNotFoundError(f"Error: File not found at '{filepath}'")
+        result["fatal_error"] = f"File not found: '{filepath}'"
+        return result
 
-    first_row = None
-    num_rows = 0
-    row_length = None
-    bytes_per_int = 4 # Standard size for int32
+    bytes_per_int = 4
 
     try:
-        with open(filepath, 'rb') as f:
+        with open(filepath, "rb") as f:
             while True:
-                # Read the dimension (4 bytes)
-                dim_bytes = f.read(bytes_per_int)
+                row_num = result["num_rows"]
 
-                # Check if end of file reached
+                dim_bytes = f.read(bytes_per_int)
                 if not dim_bytes:
-                    break # Successfully reached end of file
+                    break
 
                 if len(dim_bytes) < bytes_per_int:
-                     raise IOError(f"Error reading dimension at row {num_rows}: Unexpected end of file.")
+                    result["fatal_error"] = (
+                        f"Error reading dimension at row {row_num}: unexpected end of file."
+                    )
+                    break
 
-                # Unpack dimension (assuming little-endian 32-bit integer)
-                # Use '<i' for little-endian signed integer
-                # Use '>i' for big-endian signed integer
-                # Use '<I' or '>I' for unsigned if needed, but signed is common
                 try:
-                    dim = struct.unpack('<i', dim_bytes)[0]
+                    dim = struct.unpack("<i", dim_bytes)[0]
                 except struct.error as e:
-                    raise IOError(f"Error unpacking dimension at row {num_rows}: {e}")
+                    result["fatal_error"] = f"Error unpacking dimension at row {row_num}: {e}"
+                    break
 
-                # --- Validation and Storing Information ---
-                if row_length is None: # First vector
-                    if dim <= 0:
-                        raise ValueError(f"Error: First vector dimension is non-positive ({dim}).")
-                    row_length = dim
-                elif dim != row_length:
-                    # Check consistency
-                    raise ValueError(f"Inconsistent dimension found at row {num_rows}. "
-                                     f"Expected {row_length}, but got {dim}.")
+                if dim <= 0:
+                    result["fatal_error"] = (
+                        f"Error: non-positive vector dimension {dim} at row {row_num}."
+                    )
+                    break
 
-                # --- Read the Vector Data ---
-                expected_bytes = row_length * bytes_per_int
+                result["max_row_length"] = max(result["max_row_length"], dim)
+
+                if dim < required_k:
+                    result["truncation_rows"].append((row_num, dim))
+                elif dim > required_k:
+                    result["overlong_rows"].append((row_num, dim))
+
+                expected_bytes = dim * bytes_per_int
                 vector_bytes = f.read(expected_bytes)
-
                 if len(vector_bytes) < expected_bytes:
-                    raise IOError(f"Error reading vector data at row {num_rows}: "
-                                  f"Expected {expected_bytes} bytes, got {len(vector_bytes)}. "
-                                  "Unexpected end of file.")
+                    result["fatal_error"] = (
+                        f"Error reading vector data at row {row_num}: "
+                        f"expected {expected_bytes} bytes, got {len(vector_bytes)}. "
+                        "Unexpected end of file."
+                    )
+                    break
 
-                # --- Unpack Vector Data ---
-                # Format string like '<128i' for a 128-dim vector, little-endian
-                format_string = f'<{row_length}i'
+                format_string = f"<{dim}i"
                 try:
                     vector = struct.unpack(format_string, vector_bytes)
                 except struct.error as e:
-                     raise IOError(f"Error unpacking vector data at row {num_rows} (dim={row_length}): {e}")
+                    result["fatal_error"] = (
+                        f"Error unpacking vector data at row {row_num} (dim={dim}): {e}"
+                    )
+                    break
 
-                # --- Store First Row ---
-                if first_row is None:
-                    first_row = list(vector) # Store as a list
+                if result["first_row"] is None:
+                    result["first_row"] = list(vector)
+                    result["first_row_length"] = dim
 
-                # --- Increment Row Count ---
-                num_rows += 1
+                row_max = max(vector)
+                if result["max_ordinal"] is None or row_max > result["max_ordinal"]:
+                    result["max_ordinal"] = row_max
 
-    except Exception as e:
-        # Re-raise exceptions for clarity or handle them as needed
-        print(f"An error occurred: {e}", file=sys.stderr)
-        raise # Re-raise the caught exception
+                negative_count = sum(1 for x in vector if x < 0)
+                if negative_count > 0:
+                    result["negative_rows"].append((row_num, negative_count))
 
-    return first_row, num_rows, row_length
+                counts = Counter(vector)
+                dup_counts = {ordinal: count for ordinal, count in counts.items() if count > 1}
+                if dup_counts:
+                    result["duplicate_rows"].append((row_num, dup_counts))
 
-# --- Example Usage ---
+                result["num_rows"] += 1
+
+    except OSError as e:
+        result["fatal_error"] = f"OS error while reading file: {e}"
+
+    return result
+
+
 if __name__ == "__main__":
-    # Replace with the actual path to your .ivecs file
-    # Example: SIFT1M ground truth file
-    # ivecs_file_path = 'sift/sift_groundtruth.ivecs'
-    ivecs_file_path = input("Enter the path to the .ivecs file: ")
+    if len(sys.argv) != 3:
+        print(f"Usage: {os.path.basename(sys.argv[0])} <groundtruth.ivecs> <required_k>", file=sys.stderr)
+        sys.exit(2)
+
+    ivecs_file_path = sys.argv[1]
+    required_k_input = sys.argv[2]
+
+    report_prefix = os.path.splitext(os.path.basename(ivecs_file_path))[0]
+    report_path = f"{report_prefix}_report.txt"
+    report_lines = []
+
+    def emit(line=""):
+        print(line)
+        report_lines.append(line)
+
+    exit_code = 0
 
     try:
-        first_vector, total_rows, vector_dim = read_ivecs_info(ivecs_file_path)
+        required_k = int(required_k_input)
+        if required_k <= 0:
+            raise ValueError("required ground-truth k must be positive")
 
-        print(f"\n--- File Information for: {ivecs_file_path} ---")
+        info = validate_ivecs_file(ivecs_file_path, required_k)
 
-        if total_rows > 0:
-            print(f"Total number of rows (vectors): {total_rows}")
-            print(f"Vector dimensionality (length): {vector_dim}")
-            print(f"\nFirst row (vector):")
-            # Print only the first few elements if it's very long
+        first_vector = info["first_row"]
+        total_rows = info["num_rows"]
+        first_row_length = info["first_row_length"]
+        max_row_length = info["max_row_length"]
+        max_ordinal = info["max_ordinal"]
+        duplicate_rows = info["duplicate_rows"]
+        negative_rows = info["negative_rows"]
+        truncation_rows = info["truncation_rows"]
+        overlong_rows = info["overlong_rows"]
+        fatal_error = info["fatal_error"]
+
+        max_rows_to_report = 20
+        max_dups_per_row_to_report = 10
+
+        emit(f"--- File Information for: {ivecs_file_path} ---")
+        emit(f"Fully read rows: {total_rows}")
+        emit(f"Maximum declared row length observed: {max_row_length}")
+        emit(f"Largest integer found in fully read rows: {max_ordinal if max_ordinal is not None else 'N/A'}")
+
+        if first_vector is not None:
+            emit(f"First fully read row length: {first_row_length}")
+            emit("")
+            emit("First row (vector):")
             max_elements_to_print = 20
             if len(first_vector) > max_elements_to_print:
-                 print(f"  {first_vector[:max_elements_to_print]} ... (truncated)")
+                emit(f"  {first_vector[:max_elements_to_print]} ... (truncated)")
             else:
-                 print(f"  {first_vector}")
+                emit(f"  {first_vector}")
         else:
-            print("The file appears to be empty or could not be read correctly.")
+            emit("No complete row was successfully read.")
 
-    except FileNotFoundError as e:
-        print(e, file=sys.stderr)
-    except (IOError, ValueError) as e:
-        print(f"Error processing file: {e}", file=sys.stderr)
-    except Exception as e:
-        print(f"An unexpected error occurred: {e}", file=sys.stderr)
+        emit("")
+        emit("--- Validation Summary ---")
+
+        if fatal_error is None:
+            emit("PASS: File parsing completed.")
+        else:
+            emit(f"FAIL: File parsing did not complete: {fatal_error}")
+            exit_code = 1
+
+        if not duplicate_rows:
+            emit("PASS: No duplicate ordinals found within any fully read row.")
+        else:
+            emit(f"FAIL: {len(duplicate_rows)} row(s) contain duplicate ordinals.")
+            for row_num, dup_counts in duplicate_rows[:max_rows_to_report]:
+                items = sorted(dup_counts.items())[:max_dups_per_row_to_report]
+                detail = ", ".join(f"{ordinal} x{count}" for ordinal, count in items)
+                if len(dup_counts) > max_dups_per_row_to_report:
+                    detail += ", ..."
+                emit(f"  Row {row_num}: {detail}")
+            if len(duplicate_rows) > max_rows_to_report:
+                emit(f"  ... and {len(duplicate_rows) - max_rows_to_report} more row(s)")
+            exit_code = 1
+
+        if not negative_rows:
+            emit("PASS: No invalid entries found (all values are >= 0 in fully read rows).")
+        else:
+            emit(f"FAIL: {len(negative_rows)} row(s) contain invalid entries (values < 0).")
+            for row_num, negative_count in negative_rows[:max_rows_to_report]:
+                emit(f"  Row {row_num}: invalid_count={negative_count}")
+            if len(negative_rows) > max_rows_to_report:
+                emit(f"  ... and {len(negative_rows) - max_rows_to_report} more row(s)")
+            exit_code = 1
+
+        if not truncation_rows and not overlong_rows:
+            emit(f"PASS: Every declared row length matched required k={required_k}.")
+        else:
+            if truncation_rows:
+                emit(f"FAIL: {len(truncation_rows)} row(s) are shorter than required k ({required_k}).")
+                for row_num, row_len in truncation_rows[:max_rows_to_report]:
+                    emit(f"  Row {row_num}: length={row_len}")
+                if len(truncation_rows) > max_rows_to_report:
+                    emit(f"  ... and {len(truncation_rows) - max_rows_to_report} more row(s)")
+                exit_code = 1
+
+            if overlong_rows:
+                emit(f"FAIL: {len(overlong_rows)} row(s) exceed required k ({required_k}).")
+                for row_num, row_len in overlong_rows[:max_rows_to_report]:
+                    emit(f"  Row {row_num}: length={row_len}")
+                if len(overlong_rows) > max_rows_to_report:
+                    emit(f"  ... and {len(overlong_rows) - max_rows_to_report} more row(s)")
+                exit_code = 1
+
+        emit("")
+        emit(f"OVERALL: {'PASS' if exit_code == 0 else 'FAIL'}")
+
+    except ValueError as e:
+        emit(f"--- File Information for: {ivecs_file_path} ---")
+        emit(f"FAIL: Invalid required ground-truth k: {e}")
+        emit("")
+        emit("OVERALL: FAIL")
+        exit_code = 1
+
+    try:
+        write_report(report_path, report_lines)
+        print(f"\nReport written to: {report_path}")
+    except OSError as e:
+        print(f"Failed to write report file '{report_path}': {e}", file=sys.stderr)
+        exit_code = 1
+
+    sys.exit(exit_code)

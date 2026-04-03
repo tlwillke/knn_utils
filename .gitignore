@@ -2,3 +2,5 @@
 .idea/
 *.iml
 out/
+tests/__pycache__/
+__pycache__/

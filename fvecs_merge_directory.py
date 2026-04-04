@@ -61,16 +61,10 @@ def canonical_dataset_prefix(shared_tokens):
     """
     Convert shared filename tokens into the dataset prefix.
 
-    Heuristic:
-    - If the last shared token is a large integer (>= 10000), treat it as an
-      embedded vector-count token and drop it from the output prefix.
-    - Keep smaller numeric tokens such as model/version/dimension markers
-      like 002, 128, 1536, 3072.
+    All shared tokens are preserved, including numeric ones, because numbers
+    may be part of the dataset identity.
     """
-    tokens = list(shared_tokens)
-    if tokens and tokens[-1].isdigit() and int(tokens[-1]) >= 10000:
-        tokens.pop()
-    return "_".join(tokens)
+    return "_".join(shared_tokens)
 
 
 def pair_score(a: Path, b: Path):
@@ -240,4 +234,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    

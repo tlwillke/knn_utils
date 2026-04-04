@@ -160,18 +160,80 @@ def main():
 
         if args.plot:
             try:
-                import plotly.express as px
+                import matplotlib
+                matplotlib.use("Agg")
+                import matplotlib.pyplot as plt
+                from matplotlib.ticker import NullFormatter
             except ImportError:
-                print("Plotly is not installed. Please install plotly and pandas.")
+                print("matplotlib is not installed. Please install it with: pip install matplotlib")
                 return
 
-            # Plot the histogram of L2 norms using the accumulated norms_list.
-            fig = px.histogram(norms_list, nbins=50, labels={'value': 'L2 Norm'}, title='Histogram of Embedding Norms')
-            fig.update_layout(xaxis_title='L2 Norm', yaxis_title='Count')
-            output_file = "plot.html"
-            fig.write_html(output_file)
-            print(f"Plot saved to {output_file}. Open this file in a web browser to view the plot.")
-            fig.show()
+            norms_array = np.array(norms_list, dtype=np.float64)
+
+            exact_zeros_mask = (norms_array == 0.0)
+            exact_zeros_count = int(np.sum(exact_zeros_mask))
+            non_zero_norms = norms_array[~exact_zeros_mask]
+
+            print(f"Exact zero vectors: {exact_zeros_count:,}")
+
+            if len(non_zero_norms) == 0:
+                print("All vectors are exact zero; skipping non-zero histogram.")
+                return
+
+            plots_dir = os.path.join(os.getcwd(), "plots")
+            os.makedirs(plots_dir, exist_ok=True)
+            base_name = os.path.basename(args.filename)
+            out_png = os.path.join(plots_dir, f"{os.path.splitext(base_name)[0]}_norm_hist.png")
+
+            min_norm = float(np.min(non_zero_norms))
+            max_norm = float(np.max(non_zero_norms))
+            if min_norm == max_norm:
+                bin_edges = np.array([min_norm, min_norm * 1.01], dtype=np.float64)
+            else:
+                bin_edges = np.logspace(np.log10(min_norm), np.log10(max_norm), num=101)
+
+            plt.figure()
+            counts, edges, _ = plt.hist(non_zero_norms, bins=bin_edges, log=True)
+            plt.xscale("log")
+            plt.xlabel("L2 Norm Magnitude (Log Scale, non-zero only)")
+            plt.ylabel("Frequency (Log Scale)")
+            plt.title(f"Distribution of Non-Zero Embedding Norms\n{base_name}")
+
+            ax = plt.gca()
+            ax.xaxis.set_minor_formatter(NullFormatter())
+            ax.text(
+                0.98, 0.98,
+                f"Perfect zeros: {exact_zeros_count:,}",
+                transform=ax.transAxes,
+                ha="right",
+                va="top",
+                bbox={"boxstyle": "round", "facecolor": "white", "alpha": 0.9},
+            )
+
+            plt.savefig(out_png, dpi=150, bbox_inches="tight")
+            plt.close()
+            print(f"✅ Histogram saved to {out_png}")
+
+            def format_bin_value(value: float, overall_span: float, max_abs_edge: float) -> str:
+                if overall_span > 0 and 1e-4 <= max_abs_edge <= 1e4 and overall_span < 1.0:
+                    decimals = int(np.clip(np.ceil(-np.log10(overall_span)) + 2, 0, 12))
+                    return f"{value:.{decimals}f}"
+                return f"{value:.6e}"
+
+            overall_span = float(edges[-1] - edges[0])
+            max_abs_edge = float(np.max(np.abs(edges)))
+
+            print("\nHistogram summary:")
+            print(f"{'Bin start':>18} {'Bin end':>18} {'Count':>10}")
+
+            if exact_zeros_count > 0:
+                print(f"{'0.0 (exact)':>18} {'0.0 (exact)':>18} {exact_zeros_count:10d}")
+
+            for left, right, count in zip(edges[:-1], edges[1:], counts.astype(int)):
+                if count > 0:
+                    left_str = format_bin_value(float(left), overall_span, max_abs_edge)
+                    right_str = format_bin_value(float(right), overall_span, max_abs_edge)
+                    print(f"{left_str:>18} {right_str:>18} {count:10d}")
 
     # Add specific error handling
     except FileNotFoundError:

@@ -6,8 +6,95 @@ import argparse
 import struct
 
 PROGRESS_INTERVAL = 1_000_000
+DEFAULT_TOL_NORM = 1e-5
+DEFAULT_TOL_ZERO = 1e-6
+DEFAULT_FIRST_VECTOR_DIMS = 100
 
-def check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'):
+def format_first_embedding(embedding, max_dims):
+    """Format the first embedding, truncating to max_dims if needed."""
+    if embedding is None:
+        return "None"
+
+    shown = embedding[:max_dims]
+    formatted = np.array2string(
+        shown,
+        threshold=max_dims,
+        max_line_width=120,
+    )
+
+    if len(embedding) <= max_dims:
+        return formatted
+
+    return f"{formatted} ... (truncated to first {max_dims} of {len(embedding)} dims)"
+
+
+def format_bin_value(value, overall_span, max_abs_edge):
+    """Format histogram bin edges for readable text output."""
+    if overall_span > 0 and 1e-4 <= max_abs_edge <= 1e4 and overall_span < 1.0:
+        decimals = int(np.clip(np.ceil(-np.log10(overall_span)) + 2, 0, 12))
+        return f"{value:.{decimals}f}"
+    return f"{value:.6e}"
+
+
+def compute_norm_stats(norms_list):
+    """Compute summary statistics for vector norms."""
+    norms_array = np.asarray(norms_list, dtype=np.float64)
+    return {
+        "min": float(np.min(norms_array)),
+        "max": float(np.max(norms_array)),
+        "mean": float(np.mean(norms_array)),
+        "max_abs_deviation_from_1": float(np.max(np.abs(norms_array - 1.0))),
+    }
+
+
+def compute_histogram_data(norms_list):
+    """Compute histogram inputs and counts for norm reporting."""
+    norms_array = np.asarray(norms_list, dtype=np.float64)
+
+    exact_zeros_mask = (norms_array == 0.0)
+    exact_zeros_count = int(np.sum(exact_zeros_mask))
+    non_zero_norms = norms_array[~exact_zeros_mask]
+
+    if len(non_zero_norms) == 0:
+        return exact_zeros_count, non_zero_norms, None, None
+
+    min_norm = float(np.min(non_zero_norms))
+    max_norm = float(np.max(non_zero_norms))
+
+    if min_norm == max_norm:
+        bin_edges = np.array([min_norm, min_norm * 1.01], dtype=np.float64)
+    else:
+        bin_edges = np.logspace(np.log10(min_norm), np.log10(max_norm), num=101)
+
+    counts, edges = np.histogram(non_zero_norms, bins=bin_edges)
+    return exact_zeros_count, non_zero_norms, counts.astype(int), edges
+
+
+def format_histogram_summary(exact_zeros_count, counts, edges):
+    """Return the text histogram summary for console and report output."""
+    lines = []
+    lines.append("Histogram summary:")
+    lines.append(f"{'Bin start':>18} {'Bin end':>18} {'Count':>10}")
+
+    if exact_zeros_count > 0:
+        lines.append(f"{'0.0 (exact)':>18} {'0.0 (exact)':>18} {exact_zeros_count:10d}")
+
+    if counts is None or edges is None:
+        lines.append("All vectors are exact zero; skipping non-zero histogram bins.")
+        return "\n".join(lines)
+
+    overall_span = float(edges[-1] - edges[0])
+    max_abs_edge = float(np.max(np.abs(edges)))
+
+    for left, right, count in zip(edges[:-1], edges[1:], counts):
+        if count > 0:
+            left_str = format_bin_value(float(left), overall_span, max_abs_edge)
+            right_str = format_bin_value(float(right), overall_span, max_abs_edge)
+            lines.append(f"{left_str:>18} {right_str:>18} {int(count):10d}")
+
+    return "\n".join(lines)
+
+def check_fvecs(fname, tol_norm=DEFAULT_TOL_NORM, tol_zero=DEFAULT_TOL_ZERO, endian='little'):
     """
     Stream process an .fvecs file to check for normalization and zero vectors.
     Allows specifying the endianness ('little' or 'big').
@@ -27,7 +114,7 @@ def check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'
     total_vectors = 0
     normalized = True  # Assume true until proven otherwise
     zero_count = 0
-    norms_list = [] if plot else None
+    norms_list = []
     first_embedding = None
     d = -1  # Initialize dimension
 
@@ -95,8 +182,7 @@ def check_fvecs(fname, tol_norm=1e-3, tol_zero=1e-6, plot=False, endian='little'
 
             # --- Perform checks (norm, zero) ---
             norm_val = np.linalg.norm(vector)
-            if plot:
-                norms_list.append(norm_val)
+            norms_list.append(norm_val)
 
             # Update overall normalized status
             if (abs(norm_val - 1) > tol_norm):
@@ -125,38 +211,78 @@ def main():
         default='little',         # Default to little-endian (fvec standard)
         help="Specify the byte order (endianness) of the file. Default: little"
     )
-    parser.add_argument("--plot", action="store_true",
-                        help="Plot a histogram of vector norms using Plotly")
+    parser.add_argument(
+        "--tol-norm",
+        type=float,
+        default=DEFAULT_TOL_NORM,
+        help=f"Normalization tolerance. Default: {DEFAULT_TOL_NORM}"
+    )
+    parser.add_argument(
+        "--tol-zero",
+        type=float,
+        default=DEFAULT_TOL_ZERO,
+        help=f"Zero-vector tolerance. Default: {DEFAULT_TOL_ZERO}"
+    )
+    parser.add_argument(
+        "--first-vector-dims",
+        type=int,
+        default=DEFAULT_FIRST_VECTOR_DIMS,
+        help=f"Number of dimensions of the first vector to display/save. Default: {DEFAULT_FIRST_VECTOR_DIMS}"
+    )
+    parser.add_argument(
+        "--plot",
+        action="store_true",
+        help="Save a histogram plot of vector norms as a PNG"
+    )
     args = parser.parse_args()
+    if args.first_vector_dims <= 0:
+        raise ValueError("--first-vector-dims must be > 0")
     try:
         total_vectors, dim, normalized, zero_count, first_embedding, norms_list = check_fvecs(
             args.filename,
-            plot=args.plot,
-            endian=args.endian  # Pass the selected endianness
+            tol_norm=args.tol_norm,
+            tol_zero=args.tol_zero,
+            endian=args.endian
         )
 
+        first_embedding_str = format_first_embedding(first_embedding, args.first_vector_dims)
+
+        norm_stats = compute_norm_stats(norms_list)
+        unnormalized_count = int(np.sum(np.abs(np.asarray(norms_list, dtype=np.float64) - 1.0) > args.tol_norm))
+        exact_zeros_count, non_zero_norms, counts, edges = compute_histogram_data(norms_list)
+        histogram_summary = format_histogram_summary(exact_zeros_count, counts, edges)
+
+        summary_lines = [
+            f"Input file: {args.filename}",
+            f"Endianness: {args.endian}",
+            f"Total embeddings: {total_vectors}",
+            f"Dimensionality: {dim}",
+            f"Zero vectors (< {args.tol_zero}): {zero_count}",
+            f"Unnormalized vectors (abs(||v||_2 - 1.0) > {args.tol_norm}): {unnormalized_count}",
+            f"Norm max abs deviation from 1.0: {norm_stats['max_abs_deviation_from_1']:.9e}",
+            f"Norm mean: {norm_stats['mean']:.9e}",
+        ]
+
         print(f"✅ Successfully processed {total_vectors} embeddings using '{args.endian}' endian format.")
-        print(f"🔹 Each embedding has {dim} dimensions")
-        print(f"🔍 First embedding: {first_embedding}")
+        print()
+        print(f"First embedding: {first_embedding_str}")
+        print()
 
-        if normalized:
-            print("✅ Embeddings are normalized (L2 norm ≈ 1).")
-        else:
-            print("❌ Embeddings are not normalized (L2 norm not ≈ 1).")
+        for line in summary_lines:
+            print(line)
 
-        if zero_count > 0:
-            print(f"⚠️ Warning: Found {zero_count} ≈zero vectors in the embeddings.")
-        else:
-            print("✅ No zero vectors found in the embeddings.")
+        print()
+        print(histogram_summary)
 
         report_fname = f"{os.path.splitext(args.filename)[0]}_fvecs_check_report.txt"
         with open(report_fname, "w") as report_file:
-            report_file.write(f"Input file: {args.filename}\n")
-            report_file.write(f"Total embeddings: {total_vectors}\n")
-            report_file.write(f"Dimension: {dim}\n")
-            report_file.write(f"Normalized: {normalized}\n")
-            report_file.write(f"Zero vectors: {zero_count}\n")
-        print(f"✅ Report saved to {report_fname}")
+            report_file.write(f"First embedding: {first_embedding_str}\n\n")
+            report_file.write("\n".join(summary_lines))
+            report_file.write("\n\n")
+            report_file.write(histogram_summary)
+            report_file.write("\n")
+
+        print(f"\n✅ Report saved to {report_fname}")
 
         if args.plot:
             try:
@@ -168,16 +294,8 @@ def main():
                 print("matplotlib is not installed. Please install it with: pip install matplotlib")
                 return
 
-            norms_array = np.array(norms_list, dtype=np.float64)
-
-            exact_zeros_mask = (norms_array == 0.0)
-            exact_zeros_count = int(np.sum(exact_zeros_mask))
-            non_zero_norms = norms_array[~exact_zeros_mask]
-
-            print(f"Exact zero vectors: {exact_zeros_count:,}")
-
             if len(non_zero_norms) == 0:
-                print("All vectors are exact zero; skipping non-zero histogram.")
+                print("All vectors are exact zero; skipping non-zero histogram plot.")
                 return
 
             plots_dir = os.path.join(os.getcwd(), "plots")
@@ -185,15 +303,8 @@ def main():
             base_name = os.path.basename(args.filename)
             out_png = os.path.join(plots_dir, f"{os.path.splitext(base_name)[0]}_norm_hist.png")
 
-            min_norm = float(np.min(non_zero_norms))
-            max_norm = float(np.max(non_zero_norms))
-            if min_norm == max_norm:
-                bin_edges = np.array([min_norm, min_norm * 1.01], dtype=np.float64)
-            else:
-                bin_edges = np.logspace(np.log10(min_norm), np.log10(max_norm), num=101)
-
             plt.figure()
-            counts, edges, _ = plt.hist(non_zero_norms, bins=bin_edges, log=True)
+            plt.hist(non_zero_norms, bins=edges, log=True)
             plt.xscale("log")
             plt.xlabel("L2 Norm Magnitude (Log Scale, non-zero only)")
             plt.ylabel("Frequency (Log Scale)")
@@ -212,28 +323,7 @@ def main():
 
             plt.savefig(out_png, dpi=150, bbox_inches="tight")
             plt.close()
-            print(f"✅ Histogram saved to {out_png}")
-
-            def format_bin_value(value: float, overall_span: float, max_abs_edge: float) -> str:
-                if overall_span > 0 and 1e-4 <= max_abs_edge <= 1e4 and overall_span < 1.0:
-                    decimals = int(np.clip(np.ceil(-np.log10(overall_span)) + 2, 0, 12))
-                    return f"{value:.{decimals}f}"
-                return f"{value:.6e}"
-
-            overall_span = float(edges[-1] - edges[0])
-            max_abs_edge = float(np.max(np.abs(edges)))
-
-            print("\nHistogram summary:")
-            print(f"{'Bin start':>18} {'Bin end':>18} {'Count':>10}")
-
-            if exact_zeros_count > 0:
-                print(f"{'0.0 (exact)':>18} {'0.0 (exact)':>18} {exact_zeros_count:10d}")
-
-            for left, right, count in zip(edges[:-1], edges[1:], counts.astype(int)):
-                if count > 0:
-                    left_str = format_bin_value(float(left), overall_span, max_abs_edge)
-                    right_str = format_bin_value(float(right), overall_span, max_abs_edge)
-                    print(f"{left_str:>18} {right_str:>18} {count:10d}")
+            print(f"✅ Histogram plot saved to {out_png}")
 
     # Add specific error handling
     except FileNotFoundError:

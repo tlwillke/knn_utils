@@ -1,182 +1,371 @@
+#!/usr/bin/env python3
+
 import os
 import sys
+import shutil
+from pathlib import Path
 import numpy as np
 import faiss
 import argparse
 import struct
+import yaml
+
+ZERO_NORM_TOLERANCE = 1e-6
+NORMALIZATION_TOLERANCE = 1e-5
+DEFAULT_YAML_CONFIG_DIR = "yaml-configs"
+
+
+def resolve_yaml_config_path(path):
+    """
+    Resolve a YAML config path.
+
+    If path is explicit and exists, use it as-is.
+    Otherwise, look for it under the repo's yaml-configs directory.
+    """
+    expanded = Path(os.path.expanduser(path))
+
+    if expanded.exists():
+        return expanded
+
+    candidate = Path.cwd() / DEFAULT_YAML_CONFIG_DIR / path
+    if candidate.exists():
+        return candidate
+
+    raise ValueError(
+        f"YAML config not found: {path}. "
+        f"Tried '{expanded}' and '{candidate}'."
+    )
+
+
+def load_yaml_config(path):
+    """Load a YAML config file into a dict."""
+    resolved = resolve_yaml_config_path(path)
+    with open(resolved, "r", encoding="utf-8") as f:
+        data = yaml.safe_load(f) or {}
+
+    if not isinstance(data, dict):
+        raise ValueError("YAML config must contain a top-level mapping.")
+
+    return data
+
 
 def read_fvecs(fname):
     """
-    Reads an fvec file and returns a numpy array of shape (n, d).
-    The file is assumed to be in the format where each vector is stored
-    as: [d, float, float, ..., float], with 1 integer dimension d and d floats.
+    Read an fvecs file and return a NumPy array of shape (n, d).
     """
     with open(fname, "rb") as f:
-        data = np .fromfile(f, dtype=np.int32)
+        data = np.fromfile(f, dtype=np.int32)
         dim = data[0].item()
-        f.seek(0)  # Reset file pointer to re-read data correctly
-        data = np.fromfile(f, dtype=np.float32)  # Read full data as float32
+        f.seek(0)
+        data = np.fromfile(f, dtype=np.float32)
         num_vectors = len(data) // (dim + 1)
-        return data.reshape(num_vectors, dim + 1)[:, 1:]  # Remove first column (dimension)
+        return data.reshape(num_vectors, dim + 1)[:, 1:]
+
 
 def read_hdf5(fname, key="data"):
     """
-    Reads an HDF5 file and returns a numpy array from the dataset with the given key.
+    Read an HDF5 file and return a NumPy array from the dataset with the given key.
     """
     import h5py
-    with h5py.File(fname, 'r') as hf:
+    with h5py.File(fname, "r") as hf:
         if key not in hf:
             raise ValueError(f"Key '{key}' not found in HDF5 file: {fname}")
         dset = hf[key]
         return np.array(dset)
 
+
 def read_hdf5_tensor(fname, key="data"):
     """
-    Reads an HDF5 file and returns a numpy array from the dataset with the given key.
+    Read an HDF5 tensor dataset and flatten the leading dimensions into rows.
     """
     import h5py
-    with h5py.File(fname, 'r') as hf:
+    with h5py.File(fname, "r") as hf:
         if key not in hf:
             raise ValueError(f"Key '{key}' not found in HDF5 file: {fname}")
         tensor_arr = np.array(hf[key])
         return tensor_arr.reshape(-1, tensor_arr.shape[-1])
 
+
 def read_vectors(fname):
     """
-    Determines whether the file is HDF5 or fvec format.
-    For HDF5 files (extension .h5 or .hdf5), it checks for a colon.
-    If a colon is found, splits the string into filename and key.
-    Otherwise, uses the default key "data".
+    Determine whether the file is HDF5 or fvecs.
+
+    For HDF5 files, use the format "file.h5:key" or "file.hdf5:key".
+    Otherwise the file is read as fvecs.
     """
     fname = os.path.expanduser(fname)
-    # If a colon is present, split into file_path and key.
-    if ':' in fname:
-        file_path, key = fname.split(':', 1)
-        if file_path.endswith('.h5') or file_path.endswith('.hdf5'):
+    if ":" in fname:
+        file_path, key = fname.split(":", 1)
+        if file_path.endswith(".h5") or file_path.endswith(".hdf5"):
             return read_hdf5(file_path, key)
-        else:
-            raise ValueError("For HDF5, use the format 'file.h5:key'")
-    else:
-        return read_fvecs(fname)
+        raise ValueError("For HDF5, use the format 'file.h5:key'")
+    return read_fvecs(fname)
+
 
 def write_fvecs(fname, arr):
     """
-    Write a numpy array (shape: n x d) to an fvec file.
-    Each vector is stored as: [d (int32), float, float, ..., float]
+    Write a NumPy array of shape (n, d) to an fvecs file.
     """
     n, d = arr.shape
-    fname = os.path.expanduser(fname)  # Expand tilde to full home directory path
+    fname = os.path.expanduser(fname)
     with open(fname, "wb") as f:
         d_repr = struct.unpack("<f", np.uint32(d))[0]
-        # fvecs format: [[dim, vec1...], [dim, vec2...]]
-        formatted = np.concatenate((np.full((n, 1), d_repr, dtype=np.float32), arr.astype(np.float32)), axis=1)
-        assert(struct.unpack("<I", formatted[0][0]) == (d,))
+        formatted = np.concatenate(
+            (np.full((n, 1), d_repr, dtype=np.float32), arr.astype(np.float32)),
+            axis=1,
+        )
+        assert struct.unpack("<I", formatted[0][0]) == (d,)
         formatted.tofile(f)
+
 
 def write_ivecs(fname, ivecs):
     """
-    Writes an array of integer vectors to an ivec file.
-    Each vector is written as: [k, int, int, ..., int] where k is the number
-    of elements in the vector.
+    Write an array of integer vectors to an ivecs file.
     """
     n, k = ivecs.shape
-    fname = os.path.expanduser(fname)  # Expand tilde to full home directory path
-    with open(fname, 'wb') as f:
-        # ivecs format: [[k, int...(k times)], [k, int...(k times)]]
-        formatted = np.concatenate((np.full((n, 1), k, dtype=np.int32), ivecs.astype(np.int32)), axis=1)
+    fname = os.path.expanduser(fname)
+    with open(fname, "wb") as f:
+        formatted = np.concatenate(
+            (np.full((n, 1), k, dtype=np.int32), ivecs.astype(np.int32)),
+            axis=1,
+        )
         formatted.tofile(f)
 
-def count_zero_vectors(vecs, eps=0.0):
-    """
-    Count vectors with L2 norm <= eps. Use eps=0.0 for exact zeros.
-    """
-    norms = np.linalg.norm(vecs, axis=1)
-    return int(np.sum(norms <= eps))
 
-def remove_zero_vectors(arr, name, eps=0.0):
-    # eps lets you treat "near-zero" as zero if desired; keep eps=0.0 for exact zeros
+def write_processed_output(input_path, output_path, arr, changed, label):
+    """
+    Write a processed output file.
+
+    If this side did not change, copy the input file to the output when the
+    paths differ. Otherwise write the processed in-memory array as fvecs.
+    """
+    input_path = os.path.expanduser(input_path)
+    output_path = os.path.expanduser(output_path)
+
+    print(f"Writing processed {label} vectors to:", output_path)
+
+    if not changed:
+        if os.path.abspath(input_path) != os.path.abspath(output_path):
+            shutil.copyfile(input_path, output_path)
+            print(f"Copied unchanged {label} input to output.")
+        else:
+            print(f"{label.capitalize()} input and output are the same file. No action needed.")
+        return
+
+    write_fvecs(output_path, arr)
+
+
+def count_zero_vectors(vecs, tol=ZERO_NORM_TOLERANCE):
+    """Count vectors whose L2 norm is less than or equal to tol."""
+    norms = np.linalg.norm(vecs, axis=1)
+    return int(np.sum(norms <= tol))
+
+
+def remove_zero_vectors(arr, name, tol=ZERO_NORM_TOLERANCE):
+    """Remove vectors whose L2 norm is less than or equal to tol."""
     norms = np.linalg.norm(arr, axis=1)
-    keep = norms > eps
+    keep = norms > tol
     removed = int((~keep).sum())
     if removed:
-        print(f"Removed {removed} zero vectors from {name} (kept {keep.sum()} / {arr.shape[0]}).")
+        print(
+            f"Removed {removed} zero-like vectors from {name} "
+            f"(kept {int(keep.sum())} / {arr.shape[0]})."
+        )
     else:
-        print(f"Removed 0 zero vectors from {name}.")
-    return arr[keep]
+        print(f"Removed 0 zero-like vectors from {name}.")
+    return np.ascontiguousarray(arr[keep], dtype=np.float32)
 
-def check_normalization(vecs, tol=1e-3):
-    """
-    Returns True if all vectors in the array are approximately normalized
-    (L2 norm close to 1 within the specified tolerance).
-    """
+
+def check_normalization(vecs, tol=NORMALIZATION_TOLERANCE):
+    """Return True if every vector norm is within tol of 1.0."""
     norms = np.linalg.norm(vecs, axis=1)
-    return np.all(np.abs(norms - 1) < tol)
+    return np.all(np.abs(norms - 1.0) < tol)
+
+
+def normalize_vectors(arr, zero_tol=ZERO_NORM_TOLERANCE):
+    """
+    Normalize each vector to unit L2 norm.
+
+    Zero-like vectors are left unchanged by replacing very small norms with 1.0
+    before division.
+    """
+    arr = np.asarray(arr, dtype=np.float32)
+    if arr.ndim != 2:
+        raise ValueError(f"Expected 2D array, got shape {arr.shape}")
+
+    norms = np.linalg.norm(arr, axis=1, keepdims=True)
+    norms[norms <= zero_tol] = 1.0
+    return np.ascontiguousarray(arr / norms, dtype=np.float32)
+
 
 def build_index(base, d, metric, gpu_ids):
     """
-    Build a FAISS index for the given base vectors, dimension and metric.
-    gpu_ids should be a list of integers.
+    Build a FAISS index for the given base vectors, dimension, and metric.
     """
     if metric == "l2":
         cpu_index = faiss.IndexFlatL2(d)
     elif metric == "ip":
         cpu_index = faiss.IndexFlatIP(d)
     else:
-        raise ValueError("Unsupported metric: " + metric)
+        raise ValueError(
+            f"Unsupported metric: {metric}. Allowed values are: ip, l2."
+        )
 
     if gpu_ids[0] < 0:
         print("Using device: cpu")
         index = cpu_index
     elif len(gpu_ids) == 1:
-        print("Using device: cuda({})".format(gpu_ids[0]))
+        print(f"Using device: cuda({gpu_ids[0]})")
         res = faiss.StandardGpuResources()
         index = faiss.index_cpu_to_gpu(res, gpu_ids[0], cpu_index)
     else:
-        print("Using devices:", ", ".join("cuda({})".format(g) for g in gpu_ids))
+        print("Using devices:", ", ".join(f"cuda({g})" for g in gpu_ids))
         co = faiss.GpuMultipleClonerOptions()
         co.shard = True
         co.devices = gpu_ids
         index = faiss.index_cpu_to_all_gpus(cpu_index, co=co)
+
     index.add(base)
     return index
 
+
 def main():
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument(
+        "--config",
+        type=str,
+        default="",
+        help="Path to a YAML config file, or a file name under yaml-configs/.",
+    )
+    bootstrap_args, remaining_argv = bootstrap.parse_known_args()
+
+    config = {}
+    if bootstrap_args.config:
+        config = load_yaml_config(bootstrap_args.config)
+
     parser = argparse.ArgumentParser(
-        description='Compute ground truth for nearest neighbor search using a GPU.')
-    parser.add_argument('--base', type=str, required=True,
-                        help='Path to the base vectors file (fvec or HDF5). For HDF5, use the format "file.h5:key".')
-    parser.add_argument('--query', type=str, required=True,
-                        help='Path to the query vectors file (fvec or HDF5). For HDF5, use the format "file.h5:key".')
-    parser.add_argument('--output', type=str, required=True,
-                        help='Output ivec file to write ground truth indices.')
-    parser.add_argument('--num_base', type=int, default=0,
-                        help='Number of base vectors for truncated dataset (if 0, skip truncation).')
-    parser.add_argument('--num_query', type=int, default=0,
-                        help='Number of query vectors for truncated dataset (if 0, skip truncation).')
-    parser.add_argument('--remove_zeros', action='store_true', default=False,
-                        help='If set, remove zero-norm vectors from both base and query.')
-    parser.add_argument('--shuffle', action='store_true', default=False,
-                        help='If set, shuffle both base and query vectors.')
-    parser.add_argument('--normalize', action='store_true', default=False,
-                        help='If set, normalize both base and query vectors.')
-    parser.add_argument('--processed_base_out', type=str, default="",
-                        help='Output file for processed base vectors (fvec file) if truncation or normalization is applied.')
-    parser.add_argument('--processed_query_out', type=str, default="",
-                        help='Output file for processed query vectors (fvec file) if truncation or normalization is applied.')
-    parser.add_argument('--k', type=int, required=True,
-                        help='Number of nearest neighbors to compute ground truth indices for.')
-    parser.add_argument('--gpus', type=str, default="-1",
-                        help='Comma-separated list of GPU ids to use. Use "-1" for CPU.')
-    parser.add_argument('--metric', type=str, default='l2', choices=['l2', 'ip'],
-                        help='Distance metric to use: "l2" or "ip".')
+        description="Compute ground truth for nearest neighbor search using a GPU.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+        parents=[bootstrap],
+    )
+
+    parser.add_argument(
+        "--base",
+        type=str,
+        required="base" not in config,
+        help='Path to the base vectors file (fvecs or HDF5). For HDF5, use the format "file.h5:key".',
+    )
+    parser.add_argument(
+        "--query",
+        type=str,
+        required="query" not in config,
+        help='Path to the query vectors file (fvecs or HDF5). For HDF5, use the format "file.h5:key".',
+    )
+    parser.add_argument(
+        "--ground_truth_out",
+        type=str,
+        required="ground_truth_out" not in config,
+        help="Output ivecs file to write ground truth indices.",
+    )
+    parser.add_argument(
+        "--num_base",
+        type=int,
+        default=0,
+        help="Number of base vectors for truncation. Use 0 to skip truncation.",
+    )
+    parser.add_argument(
+        "--num_query",
+        type=int,
+        default=0,
+        help="Number of query vectors for truncation. Use 0 to skip truncation.",
+    )
+    parser.add_argument(
+        "--remove_zeros",
+        action="store_true",
+        default=False,
+        help="If set, remove zero-like vectors from both base and query.",
+    )
+    parser.add_argument(
+        "--shuffle",
+        action="store_true",
+        default=False,
+        help="If set, shuffle both base and query vectors.",
+    )
+    parser.add_argument(
+        "--shuffle_seed",
+        type=int,
+        default=42,
+        help="Random seed used when shuffling base and query vectors.",
+    )
+    parser.add_argument(
+        "--normalize",
+        action="store_true",
+        default=False,
+        help="If set, normalize both base and query vectors.",
+    )
+    parser.add_argument(
+        "--zero_tolerance",
+        type=float,
+        default=ZERO_NORM_TOLERANCE,
+        help="Treat vectors with L2 norm <= this value as zero-like for counting, removal, and zero-safe normalization.",
+    )
+    parser.add_argument(
+        "--normalization_tolerance",
+        type=float,
+        default=NORMALIZATION_TOLERANCE,
+        help="Tolerance used when checking whether vectors are already normalized to unit L2 norm.",
+    )
+    parser.add_argument(
+        "--processed_base_out",
+        type=str,
+        default="",
+        help="Output file for processed base vectors when processing is requested.",
+    )
+    parser.add_argument(
+        "--processed_query_out",
+        type=str,
+        default="",
+        help="Output file for processed query vectors when processing is requested.",
+    )
+    parser.add_argument(
+        "--k",
+        type=int,
+        required="k" not in config,
+        help="Number of nearest neighbors to compute ground truth indices for.",
+    )
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default="-1",
+        help='Comma-separated list of GPU ids to use. Use "-1" for CPU.',
+    )
+    parser.add_argument(
+        "--metric",
+        type=str,
+        default="l2",
+        choices=["l2", "ip"],
+        help='Distance metric to use: "l2" or "ip".',
+    )
+
+    parser.set_defaults(**config)
+
     if len(sys.argv) == 1:
-        parser.print_help(sys.stderr)   # prints "usage:" line + options
+        parser.print_help(sys.stderr)
         sys.exit(2)
-    args = parser.parse_args()
 
-    gpu_ids = [int(x) for x in args.gpus.split(',')]
+    args = parser.parse_args(remaining_argv)
+    args.config = bootstrap_args.config
 
-    # Load base and query vectors from files
+    if args.config:
+        print("Using config:", args.config)
+
+    if args.zero_tolerance < 0:
+        raise ValueError("--zero_tolerance must be non-negative")
+    if args.normalization_tolerance < 0:
+        raise ValueError("--normalization_tolerance must be non-negative")
+
+    gpu_ids = [int(x) for x in args.gpus.split(",")]
+
     print("Loading base vectors from:", args.base)
     base = read_vectors(args.base)
     print(f"Loaded {base.shape[0]} base vectors of dimension {base.shape[1]}.")
@@ -185,99 +374,128 @@ def main():
     query = read_vectors(args.query)
     print(f"Loaded {query.shape[0]} query vectors of dimension {query.shape[1]}.")
 
-    # Ensure dimensions match
+    base_changed = False
+    query_changed = False
+    original_base_count = base.shape[0]
+    original_query_count = query.shape[0]
+
     d = base.shape[1]
     if query.shape[1] != d:
-        raise ValueError("Dimension mismatch: base vectors have dimension {} but query vectors have dimension {}."
-                         .format(d, query.shape[1]))
+        raise ValueError(
+            "Dimension mismatch: base vectors have dimension {} but query vectors have dimension {}."
+            .format(d, query.shape[1])
+        )
 
-    # Check for zero vectors (before any shuffling/truncation/normalization)
-    base_zero = count_zero_vectors(base)  # exact zeros
-    query_zero = count_zero_vectors(query)  # exact zeros
-    print(f"Base zero vectors: {base_zero} / {base.shape[0]}")
-    print(f"Query zero vectors: {query_zero} / {query.shape[0]}")
+    print(f"Zero tolerance: {args.zero_tolerance}")
+    base_zero = count_zero_vectors(base, tol=args.zero_tolerance)
+    query_zero = count_zero_vectors(query, tol=args.zero_tolerance)
+    print(f"Base zero-like vectors: {base_zero} / {base.shape[0]}")
+    print(f"Query zero-like vectors: {query_zero} / {query.shape[0]}")
 
     if args.remove_zeros:
-        print("Removing zero vectors from both base and query.")
-        base = remove_zero_vectors(base, "base")
-        query = remove_zero_vectors(query, "query")
+        print("Removing zero-like vectors from both base and query.")
+        if base_zero > 0:
+            base = remove_zero_vectors(base, "base", tol=args.zero_tolerance)
+            base_changed = True
+        else:
+            print("Removed 0 zero-like vectors from base.")
+        if query_zero > 0:
+            query = remove_zero_vectors(query, "query", tol=args.zero_tolerance)
+            query_changed = True
+        else:
+            print("Removed 0 zero-like vectors from query.")
+
         if base.shape[0] == 0:
             raise ValueError("All base vectors were zero after removal.")
         if query.shape[0] == 0:
             raise ValueError("All query vectors were zero after removal.")
 
-    # Check normalization of base and query vectors.
-    base_normalized = check_normalization(base)
-    query_normalized = check_normalization(query)
+    print(f"Normalization tolerance: {args.normalization_tolerance}")
+    base_normalized = check_normalization(base, tol=args.normalization_tolerance)
+    query_normalized = check_normalization(query, tol=args.normalization_tolerance)
     print("Base vectors normalized:", "Yes" if base_normalized else "No")
     print("Query vectors normalized:", "Yes" if query_normalized else "No")
 
-    # Optionally shuffle both base and query vectors.
-    # Shuffle the full dataset before truncation.
     if args.shuffle:
-        print("Shuffling both base and query vectors.")
-        np.random.seed(42)  # For reproducibility
+        print(f"Shuffling both base and query vectors with seed {args.shuffle_seed}.")
+        np.random.seed(args.shuffle_seed)
         np.random.shuffle(base)
         np.random.shuffle(query)
+        base_changed = True
+        query_changed = True
 
-    # Process any truncations.
     if args.num_base > 0:
-        if args.num_base > base.shape[0]:
+        if args.num_base > original_base_count:
             raise ValueError("Truncated base size exceeds full dataset size.")
-        base = base[:args.num_base]
-        print(f"Using truncated base: {args.num_base} vectors.")
+        if args.num_base < original_base_count:
+            base = base[:args.num_base]
+            base_changed = True
+            print(f"Using truncated base: {args.num_base} vectors.")
+
     if args.num_query > 0:
-        if args.num_query > query.shape[0]:
+        if args.num_query > original_query_count:
             raise ValueError("Truncated query size exceeds full dataset size.")
-        query = query[:args.num_query]
-        print(f"Using truncated query: {args.num_query} vectors.")
+        if args.num_query < original_query_count:
+            query = query[:args.num_query]
+            query_changed = True
+            print(f"Using truncated query: {args.num_query} vectors.")
 
-    # Apply normalization if requested (to both base and query).
     if args.normalize:
-        def normalize_vectors(arr):
-            norms = np.linalg.norm(arr, axis=1, keepdims=True)
-            norms[norms == 0] = 1  # Prevent division by zero.
-            return arr / norms
+        normalized_base = False
+        normalized_query = False
 
-        base = normalize_vectors(base)
-        query = normalize_vectors(query)
-        print("Normalized both base and query vectors.")
+        if not base_normalized:
+            base = normalize_vectors(base, zero_tol=args.zero_tolerance)
+            base_changed = True
+            normalized_base = True
 
-    # Require processed output filenames when processing is applied.
-    if args.remove_zeros or args.normalize or args.shuffle or args.num_base > 0 and args.num_query > 0:
+        if not query_normalized:
+            query = normalize_vectors(query, zero_tol=args.zero_tolerance)
+            query_changed = True
+            normalized_query = True
+
+        if normalized_base and normalized_query:
+            print("Normalized both base and query vectors.")
+        elif normalized_base:
+            print("Normalized base vectors.")
+        elif normalized_query:
+            print("Normalized query vectors.")
+        else:
+            print("Normalization requested, but no normalization was needed.")
+
+    requested_processing = (
+        args.remove_zeros
+        or args.normalize
+        or args.shuffle
+        or args.num_base > 0
+        or args.num_query > 0
+    )
+
+    if requested_processing:
         if not args.processed_base_out or not args.processed_query_out:
             raise ValueError(
-                "When removing zeros, normalization, shuffling, or truncation is applied, processed_base_out and processed_query_out must be provided. ")
-        print("Writing processed base vectors to:", args.processed_base_out)
-        write_fvecs(args.processed_base_out, base)
-        print("Writing processed query vectors to:", args.processed_query_out)
-        write_fvecs(args.processed_query_out, query)
-    elif args.num_base > 0:
-        if not args.processed_base_out:
-            raise ValueError(
-                "When truncation is applied, processed_base_out must be provided.")
-        print("Writing processed base vectors to:", args.processed_base_out)
-        write_fvecs(args.processed_base_out, base)
-    elif args.num_query > 0:
-        if not args.processed_query_out:
-            raise ValueError(
-                "When truncation is applied, processed_query_out must be provided.")
-        print("Writing processed query vectors to:", args.processed_query_out)
-        write_fvecs(args.processed_query_out, query)
+                "When removing zeros, normalization, shuffling, or truncation is applied, "
+                "processed_base_out and processed_query_out must be provided."
+            )
 
-    # Creating index and adding base vectors.
+        write_processed_output(
+            args.base, args.processed_base_out, base, base_changed, "base"
+        )
+        write_processed_output(
+            args.query, args.processed_query_out, query, query_changed, "query"
+        )
+
     print("Adding base vectors to the index...")
     index = build_index(base, d, args.metric, gpu_ids)
 
-    # Perform the search for each query.
     print("Performing nearest neighbor search for k =", args.k)
     distances, indices = index.search(query, args.k)
     print("Search completed.")
 
-    # Write the ground truth indices to the output ivec file.
-    print("Writing results to output file:", args.output)
-    write_ivecs(args.output, indices)
+    print("Writing results to output file:", args.ground_truth_out)
+    write_ivecs(args.ground_truth_out, indices)
     print("Done.")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

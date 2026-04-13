@@ -1,0 +1,20 @@
+base: /Users/ted.willke/Projects/datasets-ash/glove-200-angular-1m/glove_200_angular_base_1183514.fvecs
+query: /Users/ted.willke/Projects/datasets-ash/glove-200-angular-1m/glove_200_angular_query_10000.fvecs
+k: 100
+
+remove_zeros: true
+normalize: true
+shuffle: true
+shuffle_seed: 57
+
+zero_tolerance: 1e-6
+normalization_tolerance: 1e-5
+
+processed_base_out: /Users/ted.willke/Projects/datasets-ash/glove-200-angular-100k/glove_200_angular_100k_base_100000.fvecs # optional
+processed_query_out: /Users/ted.willke/Projects/datasets-ash/glove-200-angular-100k/glove_200_angular_100k_query_10000.fvecs # optional
+ground_truth_out: /Users/ted.willke/Projects/datasets-ash/glove-200-angular-100k/glove_200_angular_100k_gt_ip_100.ivecs
+
+metric: ip
+gpus: "-1"
+num_base: 100000
+num_query: 10000
